@@ -9,6 +9,10 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OnlineShop.Api", "src\Onlin
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OnlineShop.Admin", "src\OnlineShop.Admin\OnlineShop.Admin.csproj", "{A2BDD177-F789-4E25-8325-DAC9D18C42A3}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OnlineShop.Shared", "src\OnlineShop.Shared\OnlineShop.Shared.csproj", "{5EE4AB52-38A2-498B-B290-091AB5D2D0CC}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OnlineShop.Infrastructure", "src\OnlineShop.Infrastructure\OnlineShop.Infrastructure.csproj", "{DD9FAFC7-F973-43D5-A083-832DBD86EC8C}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -26,9 +30,19 @@ Global
 		{A2BDD177-F789-4E25-8325-DAC9D18C42A3}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{A2BDD177-F789-4E25-8325-DAC9D18C42A3}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{A2BDD177-F789-4E25-8325-DAC9D18C42A3}.Release|Any CPU.Build.0 = Release|Any CPU
+		{5EE4AB52-38A2-498B-B290-091AB5D2D0CC}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{5EE4AB52-38A2-498B-B290-091AB5D2D0CC}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{5EE4AB52-38A2-498B-B290-091AB5D2D0CC}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{5EE4AB52-38A2-498B-B290-091AB5D2D0CC}.Release|Any CPU.Build.0 = Release|Any CPU
+		{DD9FAFC7-F973-43D5-A083-832DBD86EC8C}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{DD9FAFC7-F973-43D5-A083-832DBD86EC8C}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{DD9FAFC7-F973-43D5-A083-832DBD86EC8C}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{DD9FAFC7-F973-43D5-A083-832DBD86EC8C}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(NestedProjects) = preSolution
 		{C8038ED6-7241-4ED1-B989-8B39F8BBD463} = {56F40558-7307-4989-BC55-E5D0609EF936}
 		{A2BDD177-F789-4E25-8325-DAC9D18C42A3} = {56F40558-7307-4989-BC55-E5D0609EF936}
+		{5EE4AB52-38A2-498B-B290-091AB5D2D0CC} = {56F40558-7307-4989-BC55-E5D0609EF936}
+		{DD9FAFC7-F973-43D5-A083-832DBD86EC8C} = {56F40558-7307-4989-BC55-E5D0609EF936}
 	EndGlobalSection
 EndGlobal
