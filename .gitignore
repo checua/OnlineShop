@@ -1,19 +1,44 @@
-﻿# Visual Studio
-.vs/
-*.user
-*.suo
-
-# Build outputs
+﻿# =========================
+# .NET / Visual Studio
+# =========================
 bin/
 obj/
-
-# Rider / VS Code
-.idea/
+[Bb]uild/
+[Ll]og/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+.vs/
 .vscode/
+
+# Rider / Resharper
+.idea/
+_ReSharper*/
+*.DotSettings.user
 
 # OS
 .DS_Store
 Thumbs.db
 
-# Logs
-*.log
+# =========================
+# Secrets / config local
+# =========================
+**/appsettings.Development.json
+**/appsettings.Local.json
+
+# Si por accidente alguien crea appsettings.Production.json local
+**/appsettings.Production.json
+
+# =========================
+# EF / tooling
+# =========================
+*.db
+*.db-shm
+*.db-wal
+
+# =========================
+# Publish / artifacts
+# =========================
+publish/
+artifacts/

@@ -1,15 +1,54 @@
+using Microsoft.EntityFrameworkCore;
+using OnlineShop.Api.Data;
+using OnlineShop.Api.Domain;
+using Microsoft.Data.SqlClient;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Data.SqlClient;
+using Microsoft.EntityFrameworkCore;
+using OnlineShop.Api.Data;
+
+
+
+
 var builder = WebApplication.CreateBuilder(args);
 
-// Add services to the container.
-
 builder.Services.AddControllers();
-// Learn more about configuring Swagger/OpenAPI at https://aka.ms/aspnetcore/swashbuckle
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
+builder.Services.AddDbContext<OnlineShopDbContext>(opt =>
+    opt.UseSqlServer(builder.Configuration.GetConnectionString("DefaultConnection")));
+
+builder.Services.AddIdentityCore<ApplicationUser>(opt =>
+{
+    opt.User.RequireUniqueEmail = true;
+})
+.AddRoles<Microsoft.AspNetCore.Identity.IdentityRole>()
+.AddEntityFrameworkStores<OnlineShopDbContext>();
+
+builder.Services.AddHealthChecks();
+
 var app = builder.Build();
 
-// Configure the HTTP request pipeline.
+using (var scope = app.Services.CreateScope())
+{
+    var db = scope.ServiceProvider.GetRequiredService<OnlineShopDbContext>();
+    var csb = new SqlConnectionStringBuilder(db.Database.GetDbConnection().ConnectionString);
+
+    Console.WriteLine($"[DB-RUNTIME] Server={csb.DataSource} | Database={csb.InitialCatalog}");
+}
+
+
+
+using (var scope = app.Services.CreateScope())
+{
+    var db = scope.ServiceProvider.GetRequiredService<OnlineShopDbContext>();
+    await DbSeeder.SeedAsync(db);
+}
+
+
+app.MapHealthChecks("/health");
+
 if (app.Environment.IsDevelopment())
 {
     app.UseSwagger();
@@ -17,9 +56,6 @@ if (app.Environment.IsDevelopment())
 }
 
 app.UseHttpsRedirection();
-
-app.UseAuthorization();
-
 app.MapControllers();
 
 app.Run();
