@@ -1,60 +1,101 @@
-﻿using Microsoft.AspNetCore.Mvc;
+﻿using Microsoft.AspNetCore.Identity;
+using Microsoft.AspNetCore.Identity.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore;
-using OnlineShop.Api.Data;
+using OnlineShop.Api.Domain;
 
-namespace OnlineShop.Api.Controllers;
+namespace OnlineShop.Api.Data;
 
-[ApiController]
-[Route("api/store-categories")]
-public class StoreCategoriesController : ControllerBase
+public class OnlineShopDbContext : IdentityDbContext<ApplicationUser>
 {
-    private readonly OnlineShopDbContext _db;
+    public OnlineShopDbContext(DbContextOptions<OnlineShopDbContext> options) : base(options) { }
 
-    public StoreCategoriesController(OnlineShopDbContext db)
+    public DbSet<Store> Stores => Set<Store>();
+    public DbSet<StoreCategory> StoreCategories => Set<StoreCategory>();
+
+    public DbSet<ProductCategory> ProductCategories => Set<ProductCategory>();
+    public DbSet<Product> Products => Set<Product>();
+    public DbSet<ProductVariant> ProductVariants => Set<ProductVariant>();
+    public DbSet<ProductImage> ProductImages => Set<ProductImage>();
+
+    protected override void OnModelCreating(ModelBuilder builder)
     {
-        _db = db;
-    }
+        base.OnModelCreating(builder);
 
-    // GET /api/store-categories?withCounts=true
-    [HttpGet]
-    public async Task<IActionResult> Get([FromQuery] bool withCounts = false)
-    {
-        var cats = await _db.StoreCategories
-            .AsNoTracking()
-            .OrderBy(c => c.SortOrder)
-            .ThenBy(c => c.Name)
-            .Select(c => new StoreCategoryDto
-            {
-                Id = c.Id,
-                Name = c.Name,
-                SortOrder = c.SortOrder
-            })
-            .ToListAsync();
+        // 1) Default schema para TODO (incluye Identity y negocio)
+        builder.HasDefaultSchema("SHOP");
 
-        if (!withCounts)
-            return Ok(cats);
+        // 2) Identity tables en SHOP
+        builder.Entity<ApplicationUser>().ToTable("Users");
+        builder.Entity<IdentityRole>().ToTable("Roles");
+        builder.Entity<IdentityUserRole<string>>().ToTable("UserRoles");
+        builder.Entity<IdentityUserClaim<string>>().ToTable("UserClaims");
+        builder.Entity<IdentityUserLogin<string>>().ToTable("UserLogins");
+        builder.Entity<IdentityRoleClaim<string>>().ToTable("RoleClaims");
+        builder.Entity<IdentityUserToken<string>>().ToTable("UserTokens");
 
-        // Conteo de tiendas "Approved" por CategoryId
-        var counts = await _db.Stores
-            .AsNoTracking()
-            .Where(s => s.CategoryId != null && s.Status == "Approved")
-            .GroupBy(s => s.CategoryId!.Value)
-            .Select(g => new { CategoryId = g.Key, Count = g.Count() })
-            .ToDictionaryAsync(x => x.CategoryId, x => x.Count);
-
-        foreach (var c in cats)
+        // =========================
+        // Stores
+        // =========================
+        builder.Entity<Store>(e =>
         {
-            c.ApprovedStoreCount = counts.TryGetValue(c.Id, out var n) ? n : 0;
-        }
+            e.ToTable("Stores");
+            e.HasKey(x => x.Id);
 
-        return Ok(cats);
-    }
+            e.Property(x => x.Name).HasMaxLength(200).IsRequired();
+            e.Property(x => x.Slug).HasMaxLength(120).IsRequired();
+            e.Property(x => x.Status).HasMaxLength(20).IsRequired();
 
-    public class StoreCategoryDto
-    {
-        public int Id { get; set; }
-        public string Name { get; set; } = "";
-        public int SortOrder { get; set; }
-        public int? ApprovedStoreCount { get; set; } // solo cuando withCounts=true
+            e.HasIndex(x => x.Slug).IsUnique();
+
+            // Store -> StoreCategory (opcional)
+            // Esto evita ShadowFKs si tu Store tiene:
+            // int? CategoryId  + StoreCategory? Category
+            e.HasOne(x => x.Category)
+                .WithMany()
+                .HasForeignKey(x => x.CategoryId)
+                .OnDelete(DeleteBehavior.SetNull);
+        });
+
+        builder.Entity<StoreCategory>(e =>
+        {
+            e.ToTable("StoreCategories");
+            e.HasKey(x => x.Id);
+
+            e.Property(x => x.Name).HasMaxLength(100).IsRequired();
+            e.Property(x => x.SortOrder).HasDefaultValue(0);
+
+            e.HasIndex(x => x.SortOrder);
+        });
+
+        // =========================
+        // Catálogo
+        // =========================
+        builder.Entity<ProductCategory>(e =>
+        {
+            e.ToTable("ProductCategories");
+            e.HasKey(x => x.Id);
+
+            e.Property(x => x.Name).HasMaxLength(120).IsRequired();
+            e.HasIndex(x => new { x.StoreId, x.Name }).IsUnique();
+
+            // ProductCategory -> Store (requerido)
+            // NO ACTION para evitar múltiples rutas de cascade
+            e.HasOne(x => x.Store)
+                .WithMany()
+                .HasForeignKey(x => x.StoreId)
+                .OnDelete(DeleteBehavior.NoAction);
+        });
+
+        builder.Entity<Product>(e =>
+        {
+            e.ToTable("Products");
+            e.HasKey(x => x.Id);
+
+            e.Property(x => x.Name).HasMaxLength(200).IsRequired();
+            e.Property(x => x.Description).HasMaxLength(2000);
+            e.Property(x => x.BasePrice).HasColumnType("decimal(18,2)");
+
+            e.HasIndex(x => new { x.StoreId, x.Name });
+        });
     }
 }

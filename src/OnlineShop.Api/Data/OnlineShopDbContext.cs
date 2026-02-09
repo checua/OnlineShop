@@ -1,151 +1,61 @@
-﻿using Microsoft.AspNetCore.Identity;
-using Microsoft.AspNetCore.Identity.EntityFrameworkCore;
+﻿using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using OnlineShop.Api.Data;
 using OnlineShop.Api.Domain;
 
-namespace OnlineShop.Api.Data;
+namespace OnlineShop.Api.Controllers;
 
-public class OnlineShopDbContext : IdentityDbContext<ApplicationUser>
+[ApiController]
+[Route("api/store-categories")]
+public class StoreCategoriesController : ControllerBase
 {
-    public OnlineShopDbContext(DbContextOptions<OnlineShopDbContext> options) : base(options) { }
+    private readonly OnlineShopDbContext _db;
 
-    public DbSet<Store> Stores => Set<Store>();
-    public DbSet<StoreCategory> StoreCategories => Set<StoreCategory>();
-
-    public DbSet<ProductCategory> ProductCategories => Set<ProductCategory>();
-    public DbSet<Product> Products => Set<Product>();
-    public DbSet<ProductVariant> ProductVariants => Set<ProductVariant>();
-    public DbSet<ProductImage> ProductImages => Set<ProductImage>();
-
-    protected override void OnModelCreating(ModelBuilder builder)
+    public StoreCategoriesController(OnlineShopDbContext db)
     {
-        base.OnModelCreating(builder);
+        _db = db;
+    }
 
-        // 1) Default schema para TODO
-        builder.HasDefaultSchema("SHOP");
+    // GET /api/store-categories?withCounts=true
+    [HttpGet]
+    public async Task<IActionResult> Get([FromQuery] bool withCounts = false)
+    {
+        var cats = await _db.StoreCategories
+            .AsNoTracking()
+            .OrderBy(c => c.SortOrder)
+            .ThenBy(c => c.Name)
+            .Select(c => new StoreCategoryDto
+            {
+                Id = c.Id,
+                Name = c.Name,
+                SortOrder = c.SortOrder
+            })
+            .ToListAsync();
 
-        // 2) Identity tables explícitas en schema SHOP
-        builder.Entity<ApplicationUser>().ToTable("Users");
-        builder.Entity<IdentityRole>().ToTable("Roles");
-        builder.Entity<IdentityUserRole<string>>().ToTable("UserRoles");
-        builder.Entity<IdentityUserClaim<string>>().ToTable("UserClaims");
-        builder.Entity<IdentityUserLogin<string>>().ToTable("UserLogins");
-        builder.Entity<IdentityRoleClaim<string>>().ToTable("RoleClaims");
-        builder.Entity<IdentityUserToken<string>>().ToTable("UserTokens");
+        if (!withCounts)
+            return Ok(cats);
 
-        // =========================
-        // 3) Negocio: Stores
-        // =========================
-        builder.Entity<Store>(e =>
+        // Conteo de tiendas "Approved" por CategoryId
+        var counts = await _db.Stores
+            .AsNoTracking()
+            .Where(s => s.CategoryId != null && s.Status == "Approved")
+            .GroupBy(s => s.CategoryId!.Value)
+            .Select(g => new { CategoryId = g.Key, Count = g.Count() })
+            .ToDictionaryAsync(x => x.CategoryId, x => x.Count);
+
+        foreach (var c in cats)
         {
-            e.ToTable("Stores");
+            c.ApprovedStoreCount = counts.TryGetValue(c.Id, out var n) ? n : 0;
+        }
 
-            e.HasKey(x => x.Id);
+        return Ok(cats);
+    }
 
-            e.Property(x => x.Name).HasMaxLength(200).IsRequired();
-            e.Property(x => x.Slug).HasMaxLength(120).IsRequired();
-            e.Property(x => x.Status).HasMaxLength(20).IsRequired();
-
-            e.HasIndex(x => x.Slug).IsUnique();
-
-            // Store -> StoreCategory (opcional)
-            // (Si tu CategoryId es nullable, esto va perfecto)
-            e.HasOne(x => x.Category)
-                .WithMany()
-                .HasForeignKey(x => x.CategoryId)
-                .OnDelete(DeleteBehavior.SetNull);
-        });
-
-        builder.Entity<StoreCategory>(e =>
-        {
-            e.ToTable("StoreCategories");
-            e.Property(x => x.Name).HasMaxLength(100).IsRequired();
-            e.Property(x => x.SortOrder).HasDefaultValue(0);
-            e.HasIndex(x => x.SortOrder);
-        });
-
-
-        // =========================
-        // 4) Catálogo
-        // =========================
-        builder.Entity<ProductCategory>(e =>
-        {
-            e.ToTable("ProductCategories");
-
-            e.HasKey(x => x.Id);
-
-            e.Property(x => x.Name).HasMaxLength(120).IsRequired();
-            e.HasIndex(x => new { x.StoreId, x.Name }).IsUnique();
-
-            // ProductCategory -> Store (requerido)
-            // IMPORTANT: NO cascade para evitar rutas múltiples y para proteger borrados accidentales
-            e.HasOne(x => x.Store)
-                .WithMany()
-                .HasForeignKey(x => x.StoreId)
-                .OnDelete(DeleteBehavior.NoAction);
-        });
-
-        builder.Entity<Product>(e =>
-        {
-            e.ToTable("Products");
-
-            e.HasKey(x => x.Id);
-
-            e.Property(x => x.Name).HasMaxLength(200).IsRequired();
-            e.Property(x => x.Description).HasMaxLength(2000);
-            e.Property(x => x.BasePrice).HasColumnType("decimal(18,2)");
-
-            e.HasIndex(x => new { x.StoreId, x.Name });
-
-            // Product -> Store (requerido)
-            e.HasOne(x => x.Store)
-                .WithMany()
-                .HasForeignKey(x => x.StoreId)
-                .OnDelete(DeleteBehavior.NoAction);
-
-            // Product -> ProductCategory (opcional)
-            e.HasOne(x => x.Category)
-                .WithMany()
-                .HasForeignKey(x => x.CategoryId)
-                .OnDelete(DeleteBehavior.SetNull);
-
-            // Product -> Variants (cascade ok)
-            e.HasMany(x => x.Variants)
-                .WithOne(v => v.Product)
-                .HasForeignKey(v => v.ProductId)
-                .OnDelete(DeleteBehavior.Cascade);
-
-            // Product -> Images (cascade ok)
-            e.HasMany(x => x.Images)
-                .WithOne(i => i.Product)
-                .HasForeignKey(i => i.ProductId)
-                .OnDelete(DeleteBehavior.Cascade);
-        });
-
-        builder.Entity<ProductVariant>(e =>
-        {
-            e.ToTable("ProductVariants");
-
-            e.HasKey(x => x.Id);
-
-            e.Property(x => x.Sku).HasMaxLength(80);
-            e.Property(x => x.Size).HasMaxLength(40);
-            e.Property(x => x.Color).HasMaxLength(40);
-            e.Property(x => x.PriceDelta).HasColumnType("decimal(18,2)");
-
-            e.HasIndex(x => new { x.ProductId, x.Sku })
-                .IsUnique()
-                .HasFilter("[Sku] IS NOT NULL");
-        });
-
-        builder.Entity<ProductImage>(e =>
-        {
-            e.ToTable("ProductImages");
-
-            e.HasKey(x => x.Id);
-
-            e.Property(x => x.Url).HasMaxLength(500).IsRequired();
-            e.HasIndex(x => new { x.ProductId, x.SortOrder });
-        });
+    public class StoreCategoryDto
+    {
+        public int Id { get; set; }
+        public string Name { get; set; } = "";
+        public int SortOrder { get; set; }
+        public int? ApprovedStoreCount { get; set; } // solo cuando withCounts=true
     }
 }
