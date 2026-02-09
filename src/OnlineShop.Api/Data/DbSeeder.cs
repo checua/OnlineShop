@@ -16,7 +16,11 @@ public static class DbSeeder
                 new StoreCategory { Name = "Electrónica" },
                 new StoreCategory { Name = "Hogar" },
                 new StoreCategory { Name = "Salud y Belleza" },
-                new StoreCategory { Name = "Deportes" }
+                new StoreCategory { Name = "Deportes" },
+                new StoreCategory { Id = 1, Name = "Moda", SortOrder = 1 },
+                new StoreCategory { Id = 2, Name = "Calzado", SortOrder = 2 }
+
+
             );
             await db.SaveChangesAsync();
         }
@@ -29,6 +33,7 @@ public static class DbSeeder
             int Cat(string name) => cats.First(c => c.Name == name).Id;
 
             db.Stores.AddRange(
+
                 new Store { Name = "Zapatería Centro", Slug = "zapateria-centro", Status = "Approved", CategoryId = Cat("Zapatos") },
                 new Store { Name = "Moda Urbana", Slug = "moda-urbana", Status = "Approved", CategoryId = Cat("Moda") },
                 new Store { Name = "Gadgets MX", Slug = "gadgets-mx", Status = "Approved", CategoryId = Cat("Electrónica") },

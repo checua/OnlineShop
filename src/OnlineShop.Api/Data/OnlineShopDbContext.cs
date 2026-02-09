@@ -59,11 +59,11 @@ public class OnlineShopDbContext : IdentityDbContext<ApplicationUser>
         builder.Entity<StoreCategory>(e =>
         {
             e.ToTable("StoreCategories");
-
-            e.HasKey(x => x.Id);
-
             e.Property(x => x.Name).HasMaxLength(100).IsRequired();
+            e.Property(x => x.SortOrder).HasDefaultValue(0);
+            e.HasIndex(x => x.SortOrder);
         });
+
 
         // =========================
         // 4) Catálogo
