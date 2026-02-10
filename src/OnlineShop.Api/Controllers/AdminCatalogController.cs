@@ -123,4 +123,40 @@ public class AdminCatalogController : ControllerBase
 
         return Ok(new { entity.Id, entity.ProductId, entity.Url, entity.SortOrder });
     }
+
+    // GET /api/admin/catalog/products?storeId=...&page=1&pageSize=20
+    [HttpGet("products")]
+    public async Task<IActionResult> GetProducts(
+        [FromQuery] Guid? storeId,
+        [FromQuery] int page = 1,
+        [FromQuery] int pageSize = 20)
+    {
+        page = page < 1 ? 1 : page;
+        pageSize = pageSize is < 1 or > 200 ? 20 : pageSize;
+
+        var q = _db.Products.AsNoTracking();
+
+        if (storeId.HasValue)
+            q = q.Where(p => p.StoreId == storeId.Value);
+
+        var total = await q.CountAsync();
+
+        var items = await q
+            .OrderByDescending(p => p.CreatedAt)
+            .Skip((page - 1) * pageSize)
+            .Take(pageSize)
+            .Select(p => new
+            {
+                p.Id,
+                p.StoreId,
+                p.CategoryId,
+                p.Name,
+                p.BasePrice,
+                p.IsActive
+            })
+            .ToListAsync();
+
+        return Ok(new { page, pageSize, total, items });
+    }
+
 }
