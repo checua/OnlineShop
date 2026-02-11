@@ -1,8 +1,9 @@
 ﻿using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using OnlineShop.Api.Data;
-using OnlineShop.Api.Models.Common;
+using OnlineShop.Api.Domain;
 using OnlineShop.Api.Models.Catalog;
+using OnlineShop.Api.Models.Common;
 
 namespace OnlineShop.Api.Controllers;
 
@@ -17,11 +18,12 @@ public sealed class PublicCatalogController : ControllerBase
         _db = db;
     }
 
+    // GET /api/catalog/{storeSlug}/products?q=&categoryId=&minPrice=&maxPrice=&sort=&page=&pageSize=
     [HttpGet("{storeSlug}/products")]
     public async Task<ActionResult<PagedResult<CatalogProductListItemDto>>> GetProducts(
         [FromRoute] string storeSlug,
         [FromQuery] string? q,
-        [FromQuery] int? categoryId,      // por ahora lo ignoramos (ver nota abajo)
+        [FromQuery] int? categoryId,
         [FromQuery] decimal? minPrice,
         [FromQuery] decimal? maxPrice,
         [FromQuery] string? sort,
@@ -33,37 +35,26 @@ public sealed class PublicCatalogController : ControllerBase
         pageSize = pageSize < 1 ? 20 : pageSize;
         pageSize = Math.Min(pageSize, 100);
 
-        // 1) Store por slug (SIN IsApproved porque tu Store no lo trae con ese nombre)
+        // Store aprobada
         var store = await _db.Stores
             .AsNoTracking()
-            .Where(s => s.Slug == storeSlug)
+            .Where(s => s.Slug == storeSlug && s.Status == "Approved")
             .Select(s => new { s.Id })
             .SingleOrDefaultAsync(ct);
 
-        if (store is null) return NotFound();
+        if (store == null) return NotFound();
 
         var qText = (q ?? string.Empty).Trim();
         var hasQ = !string.IsNullOrWhiteSpace(qText);
         var like = $"%{qText}%";
 
-        // Detectar el campo de precio en ProductVariant
-        // Candidatos típicos: Price, UnitPrice, Amount, Value
-        var variantPriceName = typeof(OnlineShop.Api.Domain.ProductVariant)
-            .GetProperties()
-            .FirstOrDefault(p =>
-                (p.PropertyType == typeof(decimal) || p.PropertyType == typeof(decimal?)) &&
-                new[] { "Price", "UnitPrice", "Amount", "Value" }.Contains(p.Name))
-            ?.Name;
-
-        // 2) Query base
         var products = _db.Products
             .AsNoTracking()
-            .Where(p => p.StoreId == store.Id);
+            .Where(p => p.StoreId == store.Id && p.IsActive);
 
-        // Nota: categoryId -> lo activamos cuando me confirmes el nombre real del FK en Product
-        // (ahorita tu Product NO tiene ProductCategoryId, por eso te tronaba)
+        if (categoryId.HasValue)
+            products = products.Where(p => p.CategoryId == categoryId.Value);
 
-        // 3) Proyección
         var projected = products.Select(p => new
         {
             p.Id,
@@ -71,22 +62,19 @@ public sealed class PublicCatalogController : ControllerBase
             p.Description,
             p.CreatedAt,
             HasVariants = p.Variants.Any(),
+
+            // Precio real: BasePrice + min/max PriceDelta (si no hay variants => BasePrice)
+            MinPrice = p.BasePrice + (p.Variants.Select(v => (decimal?)v.PriceDelta).Min() ?? 0m),
+            MaxPrice = p.BasePrice + (p.Variants.Select(v => (decimal?)v.PriceDelta).Max() ?? 0m),
+
             MainImageUrl = p.Images
                 .OrderBy(i => i.SortOrder)
                 .ThenBy(i => i.Id)
                 .Select(i => i.Url)
-                .FirstOrDefault(),
-
-            MinPrice = variantPriceName == null
-                ? 0m
-                : (p.Variants.Select(v => (decimal?)EF.Property<decimal>(v, variantPriceName)).Min() ?? 0m),
-
-            MaxPrice = variantPriceName == null
-                ? 0m
-                : (p.Variants.Select(v => (decimal?)EF.Property<decimal>(v, variantPriceName)).Max() ?? 0m),
+                .FirstOrDefault()
         });
 
-        // 4) Filtros texto
+        // Filtro texto
         if (hasQ)
         {
             projected = projected.Where(x =>
@@ -94,17 +82,14 @@ public sealed class PublicCatalogController : ControllerBase
                 (x.Description != null && EF.Functions.Like(x.Description, like)));
         }
 
-        // 5) Filtros precio (solo si detectamos campo)
-        if (variantPriceName != null)
-        {
-            if (minPrice.HasValue)
-                projected = projected.Where(x => x.MaxPrice >= minPrice.Value);
+        // Filtro precio (overlap)
+        if (minPrice.HasValue)
+            projected = projected.Where(x => x.MaxPrice >= minPrice.Value);
 
-            if (maxPrice.HasValue)
-                projected = projected.Where(x => x.MinPrice <= maxPrice.Value);
-        }
+        if (maxPrice.HasValue)
+            projected = projected.Where(x => x.MinPrice <= maxPrice.Value);
 
-        // 6) Sorting
+        // Sorting
         var sortKey = (sort ?? string.Empty).Trim().ToLowerInvariant();
         projected = sortKey switch
         {
@@ -116,7 +101,6 @@ public sealed class PublicCatalogController : ControllerBase
             _ => projected.OrderByDescending(x => x.CreatedAt).ThenBy(x => x.Name)
         };
 
-        // 7) Page
         var total = await projected.CountAsync(ct);
 
         var items = await projected
@@ -126,7 +110,9 @@ public sealed class PublicCatalogController : ControllerBase
             {
                 ProductId = x.Id,
                 Name = x.Name,
-                Summary = x.Description == null ? null : (x.Description.Length <= 140 ? x.Description : x.Description.Substring(0, 140) + "..."),
+                Summary = x.Description == null
+                    ? null
+                    : (x.Description.Length <= 140 ? x.Description : x.Description.Substring(0, 140) + "..."),
                 MinPrice = x.MinPrice,
                 MaxPrice = x.MaxPrice,
                 MainImageUrl = x.MainImageUrl,
@@ -141,5 +127,124 @@ public sealed class PublicCatalogController : ControllerBase
             PageSize = pageSize,
             Total = total
         });
+    }
+
+    // GET /api/catalog/{storeSlug}/categories
+    [HttpGet("{storeSlug}/categories")]
+    public async Task<ActionResult<IReadOnlyList<CatalogCategoryDto>>> GetCategories(
+        [FromRoute] string storeSlug,
+        CancellationToken ct = default)
+    {
+        var store = await _db.Stores
+            .AsNoTracking()
+            .Where(s => s.Slug == storeSlug && s.Status == "Approved")
+            .Select(s => new { s.Id })
+            .SingleOrDefaultAsync(ct);
+
+        if (store == null) return NotFound();
+
+        var productCounts = _db.Products
+            .AsNoTracking()
+            .Where(p => p.StoreId == store.Id && p.IsActive && p.CategoryId != null)
+            .GroupBy(p => p.CategoryId)
+            .Select(g => new { CategoryId = g.Key, Count = g.Count() });
+
+        var categories = _db.ProductCategories.AsNoTracking();
+
+        // Si ProductCategory tiene StoreId, lo filtramos para no mezclar categorías de otras tiendas
+        var storeIdProp = typeof(ProductCategory).GetProperty("StoreId");
+        if (storeIdProp != null)
+        {
+            if (storeIdProp.PropertyType == typeof(Guid))
+            {
+                categories = categories.Where(c => EF.Property<Guid>(c, "StoreId") == store.Id);
+            }
+            else if (storeIdProp.PropertyType == typeof(Guid?))
+            {
+                categories = categories.Where(c => EF.Property<Guid?>(c, "StoreId") == store.Id);
+            }
+        }
+
+        var result = await categories
+            .GroupJoin(
+                productCounts,
+                c => (int?)c.Id,
+                pc => pc.CategoryId,
+                (c, pcs) => new CatalogCategoryDto
+                {
+                    CategoryId = c.Id,
+                    Name = c.Name,
+                    SortOrder = c.SortOrder,
+                    ProductCount = pcs.Select(x => x.Count).FirstOrDefault()
+                })
+            .OrderBy(x => x.SortOrder)
+            .ThenBy(x => x.Name)
+            .ToListAsync(ct);
+
+        return Ok(result);
+    }
+
+    // GET /api/catalog/{storeSlug}/products/{productId}
+    [HttpGet("{storeSlug}/products/{productId:guid}")]
+    public async Task<ActionResult<CatalogProductDetailDto>> GetProductDetail(
+        [FromRoute] string storeSlug,
+        [FromRoute] Guid productId,
+        CancellationToken ct = default)
+    {
+        var store = await _db.Stores
+            .AsNoTracking()
+            .Where(s => s.Slug == storeSlug && s.Status == "Approved")
+            .Select(s => new { s.Id })
+            .SingleOrDefaultAsync(ct);
+
+        if (store == null) return NotFound();
+
+        var dto = await _db.Products
+            .AsNoTracking()
+            .Where(p => p.StoreId == store.Id && p.IsActive && p.Id == productId)
+            .Select(p => new CatalogProductDetailDto
+            {
+                ProductId = p.Id,
+                Name = p.Name,
+                Description = p.Description,
+
+                CategoryId = p.CategoryId,
+                CategoryName = p.Category != null ? p.Category.Name : null,
+
+                BasePrice = p.BasePrice,
+                MinPrice = p.BasePrice + (p.Variants.Select(v => (decimal?)v.PriceDelta).Min() ?? 0m),
+                MaxPrice = p.BasePrice + (p.Variants.Select(v => (decimal?)v.PriceDelta).Max() ?? 0m),
+
+                CreatedAt = p.CreatedAt,
+
+                Images = p.Images
+                    .OrderBy(i => i.SortOrder)
+                    .ThenBy(i => i.Id)
+                    .Select(i => new CatalogProductImageDto
+                    {
+                        Url = i.Url,
+                        SortOrder = i.SortOrder
+                    })
+                    .ToList(),
+
+                Variants = p.Variants
+                    .OrderBy(v => v.Color)
+                    .ThenBy(v => v.Size)
+                    .Select(v => new CatalogProductVariantDto
+                    {
+                        VariantId = v.Id,
+                        Sku = v.Sku,
+                        Size = v.Size,
+                        Color = v.Color,
+                        PriceDelta = v.PriceDelta,
+                        Price = p.BasePrice + v.PriceDelta,
+                        Stock = v.Stock
+                    })
+                    .ToList()
+            })
+            .SingleOrDefaultAsync(ct);
+
+        if (dto == null) return NotFound();
+        return Ok(dto);
     }
 }
