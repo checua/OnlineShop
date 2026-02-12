@@ -41,7 +41,7 @@ public sealed class StripeWebhookController : ControllerBase
             return Unauthorized(); // firma inválida
         }
 
-        if (stripeEvent.Type == Events.CheckoutSessionCompleted)
+        if (stripeEvent.Type == EventTypes.CheckoutSessionCompleted)
         {
             var session = stripeEvent.Data.Object as Session;
             if (session?.Id is null) return Ok();
