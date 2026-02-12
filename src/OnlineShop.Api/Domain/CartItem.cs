@@ -12,10 +12,10 @@ public sealed class CartItem
 
     public int Quantity { get; set; }
 
-    // Snapshot (precio al momento de agregar)
+    // Snapshot de precio al agregar
     public decimal UnitPrice { get; set; }
 
-    // Snapshot (para UI rápida sin joins)
+    // Snapshot para UI rápida
     public string ProductName { get; set; } = default!;
     public string? VariantSku { get; set; }
     public string? VariantSize { get; set; }
