@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using OnlineShop.Api.Data;
 using OnlineShop.Api.Domain;
 using Microsoft.Data.SqlClient;
+using OnlineShop.Api.Controllers;
 
 
 var builder = WebApplication.CreateBuilder(args);
@@ -9,6 +10,7 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
+builder.Services.Configure<StripeOptions>(builder.Configuration.GetSection("Stripe"));
 
 
 builder.Services.AddDbContext<OnlineShopDbContext>(opt =>

@@ -3,7 +3,8 @@
 public enum CartStatus
 {
     Active = 0,
-    CheckedOut = 1,
-    Abandoned = 2,
-    Merged = 3
+    CheckoutPending = 1,
+    Completed = 2,
+    Abandoned = 3
 }
+
