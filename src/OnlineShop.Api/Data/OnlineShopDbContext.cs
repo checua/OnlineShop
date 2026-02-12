@@ -1,61 +1,154 @@
-﻿using Microsoft.AspNetCore.Mvc;
+﻿using Microsoft.AspNetCore.Identity;
+using Microsoft.AspNetCore.Identity.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore;
-using OnlineShop.Api.Data;
 using OnlineShop.Api.Domain;
 
-namespace OnlineShop.Api.Controllers;
+namespace OnlineShop.Api.Data;
 
-[ApiController]
-[Route("api/store-categories")]
-public class StoreCategoriesController : ControllerBase
+public sealed class OnlineShopDbContext
+    : IdentityDbContext<ApplicationUser, IdentityRole, string>
 {
-    private readonly OnlineShopDbContext _db;
-
-    public StoreCategoriesController(OnlineShopDbContext db)
+    public OnlineShopDbContext(DbContextOptions<OnlineShopDbContext> options)
+        : base(options)
     {
-        _db = db;
     }
 
-    // GET /api/store-categories?withCounts=true
-    [HttpGet]
-    public async Task<IActionResult> Get([FromQuery] bool withCounts = false)
+    // ===== Identity (viene de IdentityDbContext) =====
+    // DbSet<ApplicationUser> Users -> ya existe en base class
+
+    // ===== Negocio =====
+    public DbSet<StoreCategory> StoreCategories => Set<StoreCategory>();
+    public DbSet<Store> Stores => Set<Store>();
+
+    public DbSet<ProductCategory> ProductCategories => Set<ProductCategory>();
+    public DbSet<Product> Products => Set<Product>();
+
+    public DbSet<ProductVariant> ProductVariants => Set<ProductVariant>();
+    public DbSet<ProductImage> ProductImages => Set<ProductImage>();
+
+    protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
-        var cats = await _db.StoreCategories
-            .AsNoTracking()
-            .OrderBy(c => c.SortOrder)
-            .ThenBy(c => c.Name)
-            .Select(c => new StoreCategoryDto
-            {
-                Id = c.Id,
-                Name = c.Name,
-                SortOrder = c.SortOrder
-            })
-            .ToListAsync();
+        base.OnModelCreating(modelBuilder);
 
-        if (!withCounts)
-            return Ok(cats);
+        // Default schema: SHOP
+        modelBuilder.HasDefaultSchema("SHOP");
 
-        // Conteo de tiendas "Approved" por CategoryId
-        var counts = await _db.Stores
-            .AsNoTracking()
-            .Where(s => s.CategoryId != null && s.Status == "Approved")
-            .GroupBy(s => s.CategoryId!.Value)
-            .Select(g => new { CategoryId = g.Key, Count = g.Count() })
-            .ToDictionaryAsync(x => x.CategoryId, x => x.Count);
+        // ===== Identity tables names in SHOP schema =====
+        modelBuilder.Entity<ApplicationUser>().ToTable("Users");
+        modelBuilder.Entity<IdentityRole>().ToTable("Roles");
+        modelBuilder.Entity<IdentityUserRole<string>>().ToTable("UserRoles");
+        modelBuilder.Entity<IdentityUserClaim<string>>().ToTable("UserClaims");
+        modelBuilder.Entity<IdentityUserLogin<string>>().ToTable("UserLogins");
+        modelBuilder.Entity<IdentityRoleClaim<string>>().ToTable("RoleClaims");
+        modelBuilder.Entity<IdentityUserToken<string>>().ToTable("UserTokens");
 
-        foreach (var c in cats)
+        // ===== StoreCategory =====
+        modelBuilder.Entity<StoreCategory>(b =>
         {
-            c.ApprovedStoreCount = counts.TryGetValue(c.Id, out var n) ? n : 0;
-        }
+            b.ToTable("StoreCategories");
+            b.HasKey(x => x.Id);
 
-        return Ok(cats);
-    }
+            b.Property(x => x.Name).HasMaxLength(120).IsRequired();
+            b.Property(x => x.SortOrder).HasDefaultValue(0);
 
-    public class StoreCategoryDto
-    {
-        public int Id { get; set; }
-        public string Name { get; set; } = "";
-        public int SortOrder { get; set; }
-        public int? ApprovedStoreCount { get; set; } // solo cuando withCounts=true
+            b.HasIndex(x => x.Name);
+        });
+
+        // ===== Store =====
+        modelBuilder.Entity<Store>(b =>
+        {
+            b.ToTable("Stores");
+            b.HasKey(x => x.Id);
+
+            b.Property(x => x.Name).HasMaxLength(200).IsRequired();
+            b.Property(x => x.Slug).HasMaxLength(120).IsRequired();
+            b.Property(x => x.Status).HasMaxLength(32).IsRequired();
+
+            b.HasIndex(x => x.Slug).IsUnique();
+
+            // Store.CategoryId -> StoreCategory (opcional)
+            b.HasOne(x => x.Category)
+                .WithMany()
+                .HasForeignKey(x => x.CategoryId)
+                .OnDelete(DeleteBehavior.SetNull);
+        });
+
+        // ===== ProductCategory =====
+        modelBuilder.Entity<ProductCategory>(b =>
+        {
+            b.ToTable("ProductCategories");
+            b.HasKey(x => x.Id);
+
+            b.Property(x => x.Name).HasMaxLength(120).IsRequired();
+            b.Property(x => x.SortOrder).HasDefaultValue(0);
+
+            // Pertenece a una Store
+            b.HasIndex(x => new { x.StoreId, x.Name });
+        });
+
+        // ===== Product =====
+        modelBuilder.Entity<Product>(b =>
+        {
+            b.ToTable("Products");
+            b.HasKey(x => x.Id);
+
+            b.Property(x => x.Name).HasMaxLength(200).IsRequired();
+            b.Property(x => x.Description).HasMaxLength(4000);
+
+            // Si ya tienes precisión en migraciones, esto no debería moverte nada.
+            b.Property(x => x.BasePrice).HasPrecision(18, 2);
+
+            b.HasIndex(x => x.StoreId);
+            b.HasIndex(x => new { x.StoreId, x.IsActive });
+
+            // Product -> Store
+            b.HasOne(x => x.Store)
+                .WithMany()
+                .HasForeignKey(x => x.StoreId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            // Product -> ProductCategory (opcional)
+            b.HasOne(x => x.Category)
+                .WithMany()
+                .HasForeignKey(x => x.CategoryId)
+                .OnDelete(DeleteBehavior.SetNull);
+        });
+
+        // ===== ProductVariant =====
+        modelBuilder.Entity<ProductVariant>(b =>
+        {
+            b.ToTable("ProductVariants");
+            b.HasKey(x => x.Id);
+
+            b.Property(x => x.Sku).HasMaxLength(64);
+            b.Property(x => x.Size).HasMaxLength(64);
+            b.Property(x => x.Color).HasMaxLength(64);
+
+            b.Property(x => x.PriceDelta).HasPrecision(18, 2);
+
+            b.HasIndex(x => x.ProductId);
+
+            b.HasOne(x => x.Product)
+                .WithMany(p => p.Variants)
+                .HasForeignKey(x => x.ProductId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // ===== ProductImage =====
+        modelBuilder.Entity<ProductImage>(b =>
+        {
+            b.ToTable("ProductImages");
+            b.HasKey(x => x.Id);
+
+            b.Property(x => x.Url).HasMaxLength(1000).IsRequired();
+            b.Property(x => x.SortOrder).HasDefaultValue(0);
+
+            b.HasIndex(x => x.ProductId);
+
+            b.HasOne(x => x.Product)
+                .WithMany(p => p.Images)
+                .HasForeignKey(x => x.ProductId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
     }
 }

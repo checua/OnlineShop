@@ -2,12 +2,6 @@ using Microsoft.EntityFrameworkCore;
 using OnlineShop.Api.Data;
 using OnlineShop.Api.Domain;
 using Microsoft.Data.SqlClient;
-using Microsoft.EntityFrameworkCore;
-using Microsoft.Data.SqlClient;
-using Microsoft.EntityFrameworkCore;
-using OnlineShop.Api.Data;
-
-
 
 
 var builder = WebApplication.CreateBuilder(args);

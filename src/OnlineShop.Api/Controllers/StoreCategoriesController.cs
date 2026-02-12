@@ -1,101 +1,84 @@
-﻿using Microsoft.AspNetCore.Identity;
-using Microsoft.AspNetCore.Identity.EntityFrameworkCore;
+﻿using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
-using OnlineShop.Api.Domain;
+using OnlineShop.Api.Data;
 
-namespace OnlineShop.Api.Data;
+namespace OnlineShop.Api.Controllers;
 
-public class OnlineShopDbContext : IdentityDbContext<ApplicationUser>
+[ApiController]
+[Route("api/store-categories")]
+public sealed class StoreCategoriesController : ControllerBase
 {
-    public OnlineShopDbContext(DbContextOptions<OnlineShopDbContext> options) : base(options) { }
+    private readonly OnlineShopDbContext _db;
 
-    public DbSet<Store> Stores => Set<Store>();
-    public DbSet<StoreCategory> StoreCategories => Set<StoreCategory>();
-
-    public DbSet<ProductCategory> ProductCategories => Set<ProductCategory>();
-    public DbSet<Product> Products => Set<Product>();
-    public DbSet<ProductVariant> ProductVariants => Set<ProductVariant>();
-    public DbSet<ProductImage> ProductImages => Set<ProductImage>();
-
-    protected override void OnModelCreating(ModelBuilder builder)
+    public StoreCategoriesController(OnlineShopDbContext db)
     {
-        base.OnModelCreating(builder);
+        _db = db;
+    }
 
-        // 1) Default schema para TODO (incluye Identity y negocio)
-        builder.HasDefaultSchema("SHOP");
+    // GET /api/store-categories?withCounts=true&q=algo
+    [HttpGet]
+    public async Task<ActionResult<IReadOnlyList<StoreCategoryDto>>> Get(
+        [FromQuery] bool withCounts = false,
+        [FromQuery] string? q = null,
+        CancellationToken ct = default)
+    {
+        var categories = _db.StoreCategories.AsNoTracking();
 
-        // 2) Identity tables en SHOP
-        builder.Entity<ApplicationUser>().ToTable("Users");
-        builder.Entity<IdentityRole>().ToTable("Roles");
-        builder.Entity<IdentityUserRole<string>>().ToTable("UserRoles");
-        builder.Entity<IdentityUserClaim<string>>().ToTable("UserClaims");
-        builder.Entity<IdentityUserLogin<string>>().ToTable("UserLogins");
-        builder.Entity<IdentityRoleClaim<string>>().ToTable("RoleClaims");
-        builder.Entity<IdentityUserToken<string>>().ToTable("UserTokens");
-
-        // =========================
-        // Stores
-        // =========================
-        builder.Entity<Store>(e =>
+        // Búsqueda opcional por nombre
+        if (!string.IsNullOrWhiteSpace(q))
         {
-            e.ToTable("Stores");
-            e.HasKey(x => x.Id);
+            var like = $"%{q.Trim()}%";
+            categories = categories.Where(c => EF.Functions.Like(c.Name, like));
+        }
 
-            e.Property(x => x.Name).HasMaxLength(200).IsRequired();
-            e.Property(x => x.Slug).HasMaxLength(120).IsRequired();
-            e.Property(x => x.Status).HasMaxLength(20).IsRequired();
-
-            e.HasIndex(x => x.Slug).IsUnique();
-
-            // Store -> StoreCategory (opcional)
-            // Esto evita ShadowFKs si tu Store tiene:
-            // int? CategoryId  + StoreCategory? Category
-            e.HasOne(x => x.Category)
-                .WithMany()
-                .HasForeignKey(x => x.CategoryId)
-                .OnDelete(DeleteBehavior.SetNull);
-        });
-
-        builder.Entity<StoreCategory>(e =>
+        if (!withCounts)
         {
-            e.ToTable("StoreCategories");
-            e.HasKey(x => x.Id);
+            var list = await categories
+                .OrderBy(c => c.SortOrder)
+                .ThenBy(c => c.Name)
+                .Select(c => new StoreCategoryDto
+                {
+                    Id = c.Id,
+                    Name = c.Name,
+                    SortOrder = c.SortOrder,
+                    ApprovedStoreCount = null
+                })
+                .ToListAsync(ct);
 
-            e.Property(x => x.Name).HasMaxLength(100).IsRequired();
-            e.Property(x => x.SortOrder).HasDefaultValue(0);
+            return Ok(list);
+        }
 
-            e.HasIndex(x => x.SortOrder);
-        });
+        // Conteo de tiendas Approved por CategoryId (Store.CategoryId)
+        var approvedCounts = _db.Stores
+            .AsNoTracking()
+            .Where(s => s.CategoryId != null && s.Status == "Approved")
+            .GroupBy(s => s.CategoryId!.Value)
+            .Select(g => new { CategoryId = g.Key, Count = g.Count() });
 
-        // =========================
-        // Catálogo
-        // =========================
-        builder.Entity<ProductCategory>(e =>
-        {
-            e.ToTable("ProductCategories");
-            e.HasKey(x => x.Id);
+        var result = await categories
+            .GroupJoin(
+                approvedCounts,
+                c => c.Id,
+                x => x.CategoryId,
+                (c, grp) => new StoreCategoryDto
+                {
+                    Id = c.Id,
+                    Name = c.Name,
+                    SortOrder = c.SortOrder,
+                    ApprovedStoreCount = grp.Select(x => x.Count).FirstOrDefault()
+                })
+            .OrderBy(x => x.SortOrder)
+            .ThenBy(x => x.Name)
+            .ToListAsync(ct);
 
-            e.Property(x => x.Name).HasMaxLength(120).IsRequired();
-            e.HasIndex(x => new { x.StoreId, x.Name }).IsUnique();
+        return Ok(result);
+    }
 
-            // ProductCategory -> Store (requerido)
-            // NO ACTION para evitar múltiples rutas de cascade
-            e.HasOne(x => x.Store)
-                .WithMany()
-                .HasForeignKey(x => x.StoreId)
-                .OnDelete(DeleteBehavior.NoAction);
-        });
-
-        builder.Entity<Product>(e =>
-        {
-            e.ToTable("Products");
-            e.HasKey(x => x.Id);
-
-            e.Property(x => x.Name).HasMaxLength(200).IsRequired();
-            e.Property(x => x.Description).HasMaxLength(2000);
-            e.Property(x => x.BasePrice).HasColumnType("decimal(18,2)");
-
-            e.HasIndex(x => new { x.StoreId, x.Name });
-        });
+    public sealed class StoreCategoryDto
+    {
+        public int Id { get; set; }
+        public string Name { get; set; } = "";
+        public int SortOrder { get; set; }
+        public int? ApprovedStoreCount { get; set; } // solo cuando withCounts=true
     }
 }
