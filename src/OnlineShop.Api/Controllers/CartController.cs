@@ -1,10 +1,9 @@
 ﻿using System.Security.Claims;
-using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 using OnlineShop.Api.Data;
 using OnlineShop.Api.Domain;
-using OnlineShop.Api.Models.Cart;
 
 namespace OnlineShop.Api.Controllers;
 
@@ -17,319 +16,305 @@ public sealed class CartController : ControllerBase
 
     public CartController(OnlineShopDbContext db) => _db = db;
 
+    // ✅ Record => ya puedes usar "with" si lo ocupas
+    public sealed record AddCartItemRequest(Guid ProductId, Guid? VariantId, int Quantity = 1);
+
+    public sealed record CartItemDto(
+        Guid ItemId,
+        Guid ProductId,
+        Guid? VariantId,
+        int Quantity,
+        decimal UnitPrice,
+        decimal LineTotal,
+        string ProductName,
+        string? VariantSku,
+        string? VariantSize,
+        string? VariantColor,
+        string? ImageUrl
+    );
+
+    public sealed record CartDto(
+        Guid CartId,
+        string StoreSlug,
+        string? GuestId,
+        int ItemsCount,
+        decimal Subtotal,
+        List<CartItemDto> Items
+    );
+
     // GET /api/cart/{storeSlug}
     [HttpGet("{storeSlug}")]
     public async Task<ActionResult<CartDto>> GetCart([FromRoute] string storeSlug, CancellationToken ct)
     {
-        var store = await GetApprovedStoreOr404(storeSlug, ct);
+        var store = await _db.Stores
+            .AsNoTracking()
+            .Where(s => s.Slug == storeSlug && s.Status == "Approved")
+            .Select(s => new { s.Id, s.Slug })
+            .SingleOrDefaultAsync(ct);
 
-        var (userId, guestId) = EnsureActor();
-        var cart = await GetOrCreateActiveCart(store.Id, userId, guestId, ct);
+        if (store is null) return NotFound(new { error = "Tienda no encontrada o no aprobada." });
 
-        return Ok(ToDto(cart, storeSlug, guestId));
+        var userId = GetUserId();
+        var guestId = userId is null ? GetGuestIdOrNull() : null;
+
+        if (userId is null && string.IsNullOrWhiteSpace(guestId))
+            return BadRequest(new { error = $"Header requerido: {GuestHeader}" });
+
+        var cart = await FindActiveCart(store.Id, userId, guestId!, ct);
+
+        if (cart is null)
+        {
+            // No creamos carrito en GET si no existe (opcional).
+            // Si tú quieres crearlo aquí, llama GetOrCreateActiveCart(...) en vez de FindActiveCart(...)
+            return Ok(new CartDto(
+                CartId: Guid.Empty,
+                StoreSlug: store.Slug,
+                GuestId: guestId,
+                ItemsCount: 0,
+                Subtotal: 0m,
+                Items: new List<CartItemDto>()
+            ));
+        }
+
+        return Ok(ToDto(cart, store.Slug, guestId));
     }
 
     // POST /api/cart/{storeSlug}/items
     [HttpPost("{storeSlug}/items")]
     public async Task<ActionResult<CartDto>> AddItem([FromRoute] string storeSlug, [FromBody] AddCartItemRequest req, CancellationToken ct)
     {
-        if (req.Quantity < 1) return BadRequest(new { error = "Quantity inválida." });
+        // Normaliza qty (sin "with" si no quieres)
+        var qty = req.Quantity < 1 ? 1 : Math.Min(req.Quantity, 99);
 
-        var store = await GetApprovedStoreOr404(storeSlug, ct);
-        var (userId, guestId) = EnsureActor();
-        var cart = await GetOrCreateActiveCart(store.Id, userId, guestId, ct);
-
-        var product = await _db.Products
-            .Include(p => p.Images)
-            .Include(p => p.Variants)
-            .SingleOrDefaultAsync(p => p.Id == req.ProductId && p.StoreId == store.Id && p.IsActive, ct);
-
-        if (product == null) return NotFound(new { error = "Producto no encontrado." });
-
-        // Si tiene variantes, requiere VariantId
-        ProductVariant? variant = null;
-        var hasVariants = product.Variants.Any();
-
-        if (hasVariants)
-        {
-            if (req.VariantId == null) return BadRequest(new { error = "VariantId requerido para este producto." });
-
-            variant = product.Variants.SingleOrDefault(v => v.Id == req.VariantId.Value);
-            if (variant == null) return BadRequest(new { error = "VariantId inválido." });
-
-            // Stock: si Stock <= 0, no se puede vender (regla simple)
-            if (variant.Stock <= 0) return BadRequest(new { error = "Sin stock.", stock = variant.Stock });
-            if (req.Quantity > variant.Stock) return BadRequest(new { error = "Stock insuficiente.", stock = variant.Stock });
-        }
-        else
-        {
-            req.VariantId = null;
-        }
-
-        var unitPrice = product.BasePrice + (variant?.PriceDelta ?? 0m);
-
-        var mainImage = product.Images
-            .OrderBy(i => i.SortOrder)
-            .ThenBy(i => i.Id)
-            .Select(i => i.Url)
-            .FirstOrDefault();
-
-        // Merge por ProductId + VariantId
-        var existing = cart.Items.FirstOrDefault(i => i.ProductId == product.Id && i.VariantId == req.VariantId);
-
-        if (existing != null)
-        {
-            var newQty = existing.Quantity + req.Quantity;
-
-            if (variant != null && newQty > variant.Stock)
-                return BadRequest(new { error = "Stock insuficiente.", stock = variant.Stock, requested = newQty });
-
-            existing.Quantity = newQty;
-            existing.UpdatedAt = DateTime.UtcNow;
-        }
-        else
-        {
-            cart.Items.Add(new CartItem
-            {
-                CartId = cart.Id,
-                ProductId = product.Id,
-                VariantId = req.VariantId,
-                Quantity = req.Quantity,
-                UnitPrice = unitPrice,
-                ProductName = product.Name,
-                VariantSku = variant?.Sku,
-                VariantSize = variant?.Size,
-                VariantColor = variant?.Color,
-                ImageUrl = mainImage,
-                CreatedAt = DateTime.UtcNow,
-                UpdatedAt = DateTime.UtcNow
-            });
-        }
-
-        cart.UpdatedAt = DateTime.UtcNow;
-        await _db.SaveChangesAsync(ct);
-
-        return Ok(ToDto(cart, storeSlug, guestId));
-    }
-
-    // PATCH /api/cart/{storeSlug}/items/{itemId}
-    [HttpPatch("{storeSlug}/items/{itemId:guid}")]
-    public async Task<ActionResult<CartDto>> UpdateItem([FromRoute] string storeSlug, [FromRoute] Guid itemId, [FromBody] UpdateCartItemRequest req, CancellationToken ct)
-    {
-        if (req.Quantity < 0) return BadRequest(new { error = "Quantity inválida." });
-
-        var store = await GetApprovedStoreOr404(storeSlug, ct);
-        var (userId, guestId) = EnsureActor();
-        var cart = await GetOrCreateActiveCart(store.Id, userId, guestId, ct);
-
-        var item = cart.Items.SingleOrDefault(i => i.Id == itemId);
-        if (item == null) return NotFound();
-
-        if (req.Quantity == 0)
-        {
-            cart.Items.Remove(item);
-        }
-        else
-        {
-            // validar stock si tiene variante
-            if (item.VariantId != null)
-            {
-                var variant = await _db.ProductVariants
-                    .AsNoTracking()
-                    .SingleOrDefaultAsync(v => v.Id == item.VariantId.Value, ct);
-
-                if (variant != null)
-                {
-                    if (variant.Stock <= 0) return BadRequest(new { error = "Sin stock.", stock = variant.Stock });
-                    if (req.Quantity > variant.Stock) return BadRequest(new { error = "Stock insuficiente.", stock = variant.Stock });
-                }
-            }
-
-            item.Quantity = req.Quantity;
-            item.UpdatedAt = DateTime.UtcNow;
-        }
-
-        cart.UpdatedAt = DateTime.UtcNow;
-        await _db.SaveChangesAsync(ct);
-
-        return Ok(ToDto(cart, storeSlug, guestId));
-    }
-
-    // DELETE /api/cart/{storeSlug}/items/{itemId}
-    [HttpDelete("{storeSlug}/items/{itemId:guid}")]
-    public async Task<ActionResult<CartDto>> DeleteItem([FromRoute] string storeSlug, [FromRoute] Guid itemId, CancellationToken ct)
-    {
-        var store = await GetApprovedStoreOr404(storeSlug, ct);
-        var (userId, guestId) = EnsureActor();
-        var cart = await GetOrCreateActiveCart(store.Id, userId, guestId, ct);
-
-        var item = cart.Items.SingleOrDefault(i => i.Id == itemId);
-        if (item == null) return NotFound();
-
-        cart.Items.Remove(item);
-        cart.UpdatedAt = DateTime.UtcNow;
-        await _db.SaveChangesAsync(ct);
-
-        return Ok(ToDto(cart, storeSlug, guestId));
-    }
-
-    // POST /api/cart/{storeSlug}/merge  (guest -> user)
-    [Authorize]
-    [HttpPost("{storeSlug}/merge")]
-    public async Task<ActionResult<CartDto>> MergeGuestToUser([FromRoute] string storeSlug, CancellationToken ct)
-    {
-        var store = await GetApprovedStoreOr404(storeSlug, ct);
-
-        var userId = User.FindFirstValue(ClaimTypes.NameIdentifier);
-        if (string.IsNullOrWhiteSpace(userId)) return Unauthorized();
-
-        var guestId = Request.Headers[GuestHeader].FirstOrDefault();
-        if (string.IsNullOrWhiteSpace(guestId))
-            return BadRequest(new { error = $"Falta header {GuestHeader}." });
-
-        var guestCart = await _db.Carts
-            .Include(c => c.Items)
-            .SingleOrDefaultAsync(c => c.StoreId == store.Id && c.GuestId == guestId && c.Status == CartStatus.Active, ct);
-
-        // Si no hay guest cart, regresa el del usuario
-        if (guestCart == null)
-        {
-            var userCartOnly = await GetOrCreateActiveCart(store.Id, userId, null, ct);
-            return Ok(ToDto(userCartOnly, storeSlug, null));
-        }
-
-        var userCart = await _db.Carts
-            .Include(c => c.Items)
-            .SingleOrDefaultAsync(c => c.StoreId == store.Id && c.UserId == userId && c.Status == CartStatus.Active, ct);
-
-        // Si el usuario no tenía carrito, convierte guest->user
-        if (userCart == null)
-        {
-            guestCart.UserId = userId;
-            guestCart.GuestId = null;
-            guestCart.UpdatedAt = DateTime.UtcNow;
-            await _db.SaveChangesAsync(ct);
-
-            return Ok(ToDto(guestCart, storeSlug, null));
-        }
-
-        // Merge items
-        foreach (var gi in guestCart.Items.ToList())
-        {
-            var existing = userCart.Items.FirstOrDefault(ui => ui.ProductId == gi.ProductId && ui.VariantId == gi.VariantId);
-            if (existing != null)
-            {
-                existing.Quantity += gi.Quantity;
-                existing.UpdatedAt = DateTime.UtcNow;
-                _db.CartItems.Remove(gi);
-            }
-            else
-            {
-                gi.CartId = userCart.Id;
-                gi.Cart = userCart;
-                userCart.Items.Add(gi);
-            }
-        }
-
-        guestCart.Status = CartStatus.Merged;
-        guestCart.UpdatedAt = DateTime.UtcNow;
-        userCart.UpdatedAt = DateTime.UtcNow;
-
-        await _db.SaveChangesAsync(ct);
-
-        return Ok(ToDto(userCart, storeSlug, null));
-    }
-
-    // ---------------- Helpers ----------------
-
-    private (string? userId, string? guestId) EnsureActor()
-    {
-        if (User?.Identity?.IsAuthenticated == true)
-        {
-            var uid = User.FindFirstValue(ClaimTypes.NameIdentifier);
-            return (uid, null);
-        }
-
-        var guestId = Request.Headers[GuestHeader].FirstOrDefault()
-                      ?? Request.Query["guestId"].FirstOrDefault();
-
-        if (string.IsNullOrWhiteSpace(guestId))
-        {
-            guestId = Guid.NewGuid().ToString("N");
-            Response.Headers[GuestHeader] = guestId; // para que el cliente lo guarde
-        }
-
-        return (null, guestId);
-    }
-
-    private async Task<Store> GetApprovedStoreOr404(string storeSlug, CancellationToken ct)
-    {
         var store = await _db.Stores
             .AsNoTracking()
-            .SingleOrDefaultAsync(s => s.Slug == storeSlug && s.Status == "Approved", ct);
+            .Where(s => s.Slug == storeSlug && s.Status == "Approved")
+            .Select(s => new { s.Id, s.Slug })
+            .SingleOrDefaultAsync(ct);
 
-        if (store == null) throw new InvalidOperationException("STORE_NOT_FOUND_OR_NOT_APPROVED");
-        return store;
+        if (store is null) return NotFound(new { error = "Tienda no encontrada o no aprobada." });
+
+        var userId = GetUserId();
+        var guestId = userId is null ? GetGuestIdOrNull() : null;
+
+        if (userId is null && string.IsNullOrWhiteSpace(guestId))
+            return BadRequest(new { error = $"Header requerido: {GuestHeader}" });
+
+        // Producto + variantes + imagen principal (proyección ligera)
+        var product = await _db.Products
+            .AsNoTracking()
+            .Where(p => p.Id == req.ProductId && p.StoreId == store.Id && p.IsActive)
+            .Select(p => new
+            {
+                p.Id,
+                p.Name,
+                p.BasePrice,
+                HasVariants = p.Variants.Any(),
+                MainImageUrl = p.Images.OrderBy(i => i.SortOrder).Select(i => i.Url).FirstOrDefault()
+            })
+            .SingleOrDefaultAsync(ct);
+
+        if (product is null)
+            return BadRequest(new { error = "ProductId inválido para esta tienda (o inactivo)." });
+
+        ProductVariant? variantEntity = null;
+
+        if (product.HasVariants)
+        {
+            if (req.VariantId is null)
+                return BadRequest(new { error = "VariantId requerido para este producto." });
+
+            variantEntity = await _db.ProductVariants
+                .AsNoTracking()
+                .Where(v => v.Id == req.VariantId.Value && v.ProductId == product.Id)
+                .SingleOrDefaultAsync(ct);
+
+            if (variantEntity is null)
+                return BadRequest(new { error = "VariantId inválido." });
+        }
+        else
+        {
+            // si el producto NO tiene variantes, ignoramos VariantId si llega
+            variantEntity = null;
+        }
+
+        var unitPrice = product.BasePrice + (variantEntity?.PriceDelta ?? 0m);
+
+        // ✅ Carrito activo (crea si no existe) con manejo de carrera
+        var cart = await GetOrCreateActiveCart(store.Id, userId, guestId!, ct);
+
+        // Buscar item existente (tracked)
+        var existingItem = await _db.CartItems
+            .Where(i => i.CartId == cart.Id && i.ProductId == product.Id && i.VariantId == (variantEntity != null ? variantEntity.Id : null))
+            .SingleOrDefaultAsync(ct);
+
+        var now = DateTime.UtcNow;
+
+        if (existingItem is null)
+        {
+            var newItem = new CartItem
+            {
+                Id = Guid.NewGuid(),
+                CartId = cart.Id,
+                ProductId = product.Id,
+                VariantId = variantEntity?.Id,
+                Quantity = qty,
+                UnitPrice = unitPrice,
+
+                ProductName = product.Name,
+                VariantSku = variantEntity?.Sku,
+                VariantSize = variantEntity?.Size,
+                VariantColor = variantEntity?.Color,
+                ImageUrl = product.MainImageUrl,
+
+                CreatedAt = now,
+                UpdatedAt = now
+            };
+
+            // ✅ NUEVO => Add (NO Update)
+            _db.CartItems.Add(newItem);
+        }
+        else
+        {
+            existingItem.Quantity += qty;
+            existingItem.UnitPrice = unitPrice; // opcional (si quieres mantener el snapshot, quítalo)
+            existingItem.UpdatedAt = now;
+        }
+
+        cart.UpdatedAt = now;
+
+        try
+        {
+            await _db.SaveChangesAsync(ct);
+        }
+        catch (DbUpdateException ex) when (IsUniqueViolation(ex))
+        {
+            // Carrera típica: dos requests meten el mismo item al mismo tiempo por el índice único.
+            // Re-lee y actualiza.
+            var retryItem = await _db.CartItems
+                .Where(i => i.CartId == cart.Id && i.ProductId == product.Id && i.VariantId == (variantEntity != null ? variantEntity.Id : null))
+                .SingleAsync(ct);
+
+            retryItem.Quantity += qty;
+            retryItem.UpdatedAt = DateTime.UtcNow;
+            cart.UpdatedAt = DateTime.UtcNow;
+
+            await _db.SaveChangesAsync(ct);
+        }
+
+        // Responder el carrito actualizado
+        var fullCart = await _db.Carts
+            .AsNoTracking()
+            .Include(c => c.Items)
+            .Where(c => c.Id == cart.Id)
+            .SingleAsync(ct);
+
+        return Ok(ToDto(fullCart, store.Slug, guestId));
     }
 
-    private async Task<Cart> GetOrCreateActiveCart(Guid storeId, string? userId, string? guestId, CancellationToken ct)
+    // ----------------- Helpers -----------------
+
+    private string? GetUserId()
+        => User?.Identity?.IsAuthenticated == true
+            ? User.FindFirstValue(ClaimTypes.NameIdentifier)
+            : null;
+
+    private string? GetGuestIdOrNull()
     {
-        var query = _db.Carts
+        if (!Request.Headers.TryGetValue(GuestHeader, out var v)) return null;
+        var s = v.ToString().Trim();
+        return string.IsNullOrWhiteSpace(s) ? null : s;
+    }
+
+    private async Task<Cart?> FindActiveCart(Guid storeId, string? userId, string guestId, CancellationToken ct)
+    {
+        var q = _db.Carts
+            .AsNoTracking()
             .Include(c => c.Items)
             .Where(c => c.StoreId == storeId && c.Status == CartStatus.Active);
 
-        Cart? cart;
-        if (!string.IsNullOrWhiteSpace(userId))
-            cart = await query.SingleOrDefaultAsync(c => c.UserId == userId, ct);
-        else
-            cart = await query.SingleOrDefaultAsync(c => c.GuestId == guestId, ct);
+        q = userId is not null
+            ? q.Where(c => c.UserId == userId)
+            : q.Where(c => c.GuestId == guestId);
 
-        if (cart != null) return cart;
+        return await q.SingleOrDefaultAsync(ct);
+    }
+
+    private async Task<Cart> GetOrCreateActiveCart(Guid storeId, string? userId, string guestId, CancellationToken ct)
+    {
+        var q = _db.Carts
+            .Include(c => c.Items)
+            .Where(c => c.StoreId == storeId && c.Status == CartStatus.Active);
+
+        q = userId is not null
+            ? q.Where(c => c.UserId == userId)
+            : q.Where(c => c.GuestId == guestId);
+
+        var cart = await q.SingleOrDefaultAsync(ct);
+        if (cart is not null) return cart;
+
+        var now = DateTime.UtcNow;
 
         cart = new Cart
         {
+            Id = Guid.NewGuid(),
             StoreId = storeId,
             UserId = userId,
-            GuestId = guestId,
+            GuestId = userId is null ? guestId : null,
             Status = CartStatus.Active,
-            CreatedAt = DateTime.UtcNow,
-            UpdatedAt = DateTime.UtcNow
+            CreatedAt = now,
+            UpdatedAt = now
         };
 
         _db.Carts.Add(cart);
-        await _db.SaveChangesAsync(ct);
 
-        return await _db.Carts.Include(c => c.Items).SingleAsync(c => c.Id == cart.Id, ct);
+        try
+        {
+            await _db.SaveChangesAsync(ct);
+            return cart;
+        }
+        catch (DbUpdateException ex) when (IsUniqueViolation(ex))
+        {
+            // Ya lo creó alguien más, recargamos
+            _db.Entry(cart).State = EntityState.Detached;
+
+            var existing = await q.SingleAsync(ct);
+            return existing;
+        }
     }
+
+    private static bool IsUniqueViolation(DbUpdateException ex)
+        => ex.InnerException is SqlException sql && (sql.Number == 2601 || sql.Number == 2627);
 
     private static CartDto ToDto(Cart cart, string storeSlug, string? guestId)
     {
         var items = cart.Items
             .OrderBy(i => i.CreatedAt)
-            .Select(i => new CartItemDto
-            {
-                ItemId = i.Id,
-                ProductId = i.ProductId,
-                VariantId = i.VariantId,
-                Name = i.ProductName,
-                Sku = i.VariantSku,
-                Size = i.VariantSize,
-                Color = i.VariantColor,
-                ImageUrl = i.ImageUrl,
-                Quantity = i.Quantity,
-                UnitPrice = i.UnitPrice,
-                LineTotal = i.UnitPrice * i.Quantity
-            })
+            .Select(i => new CartItemDto(
+                ItemId: i.Id,
+                ProductId: i.ProductId,
+                VariantId: i.VariantId,
+                Quantity: i.Quantity,
+                UnitPrice: i.UnitPrice,
+                LineTotal: i.UnitPrice * i.Quantity,
+                ProductName: i.ProductName,
+                VariantSku: i.VariantSku,
+                VariantSize: i.VariantSize,
+                VariantColor: i.VariantColor,
+                ImageUrl: i.ImageUrl
+            ))
             .ToList();
 
-        return new CartDto
-        {
-            CartId = cart.Id,
-            StoreSlug = storeSlug,
-            GuestId = guestId,
-            Items = items,
-            ItemsCount = items.Sum(x => x.Quantity),
-            Subtotal = items.Sum(x => x.LineTotal)
-        };
+        var subtotal = items.Sum(x => x.LineTotal);
+        var itemsCount = items.Sum(x => x.Quantity);
+
+        return new CartDto(
+            CartId: cart.Id,
+            StoreSlug: storeSlug,
+            GuestId: guestId,
+            ItemsCount: itemsCount,
+            Subtotal: subtotal,
+            Items: items
+        );
     }
 }
