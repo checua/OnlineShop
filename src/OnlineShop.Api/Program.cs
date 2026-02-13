@@ -10,7 +10,13 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
-builder.Services.Configure<StripeOptions>(builder.Configuration.GetSection("Stripe"));
+
+builder.Services.AddOptions<StripeOptions>()
+    .Bind(builder.Configuration.GetSection("Stripe"))
+    .Validate(o => !string.IsNullOrWhiteSpace(o.SecretKey), "Stripe:SecretKey requerido")
+    .Validate(o => !string.IsNullOrWhiteSpace(o.WebhookSecret), "Stripe:WebhookSecret requerido")
+    .ValidateOnStart();
+
 
 
 builder.Services.AddDbContext<OnlineShopDbContext>(opt =>

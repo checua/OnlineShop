@@ -5,21 +5,23 @@ VisualStudioVersion = 17.0.31903.59
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src", "{56F40558-7307-4989-BC55-E5D0609EF936}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OnlineShop.Api", "src\OnlineShop.Api\OnlineShop.Api.csproj", "{C8038ED6-7241-4ED1-B989-8B39F8BBD463}"
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "OnlineShop.Api", "src\OnlineShop.Api\OnlineShop.Api.csproj", "{C8038ED6-7241-4ED1-B989-8B39F8BBD463}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OnlineShop.Admin", "src\OnlineShop.Admin\OnlineShop.Admin.csproj", "{A2BDD177-F789-4E25-8325-DAC9D18C42A3}"
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "OnlineShop.Admin", "src\OnlineShop.Admin\OnlineShop.Admin.csproj", "{A2BDD177-F789-4E25-8325-DAC9D18C42A3}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OnlineShop.Shared", "src\OnlineShop.Shared\OnlineShop.Shared.csproj", "{5EE4AB52-38A2-498B-B290-091AB5D2D0CC}"
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "OnlineShop.Shared", "src\OnlineShop.Shared\OnlineShop.Shared.csproj", "{5EE4AB52-38A2-498B-B290-091AB5D2D0CC}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OnlineShop.Infrastructure", "src\OnlineShop.Infrastructure\OnlineShop.Infrastructure.csproj", "{DD9FAFC7-F973-43D5-A083-832DBD86EC8C}"
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "OnlineShop.Infrastructure", "src\OnlineShop.Infrastructure\OnlineShop.Infrastructure.csproj", "{DD9FAFC7-F973-43D5-A083-832DBD86EC8C}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Solution Items", "Solution Items", "{48DEDB9E-A5DA-4531-8CA0-1D1D868F116C}"
+	ProjectSection(SolutionItems) = preProject
+		.gitignore = .gitignore
+	EndProjectSection
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
 		Release|Any CPU = Release|Any CPU
-	EndGlobalSection
-	GlobalSection(SolutionProperties) = preSolution
-		HideSolutionNode = FALSE
 	EndGlobalSection
 	GlobalSection(ProjectConfigurationPlatforms) = postSolution
 		{C8038ED6-7241-4ED1-B989-8B39F8BBD463}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
@@ -39,10 +41,16 @@ Global
 		{DD9FAFC7-F973-43D5-A083-832DBD86EC8C}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{DD9FAFC7-F973-43D5-A083-832DBD86EC8C}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
 	GlobalSection(NestedProjects) = preSolution
 		{C8038ED6-7241-4ED1-B989-8B39F8BBD463} = {56F40558-7307-4989-BC55-E5D0609EF936}
 		{A2BDD177-F789-4E25-8325-DAC9D18C42A3} = {56F40558-7307-4989-BC55-E5D0609EF936}
 		{5EE4AB52-38A2-498B-B290-091AB5D2D0CC} = {56F40558-7307-4989-BC55-E5D0609EF936}
 		{DD9FAFC7-F973-43D5-A083-832DBD86EC8C} = {56F40558-7307-4989-BC55-E5D0609EF936}
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {CA5BEBC4-114F-4FAB-A388-C952B44238D7}
 	EndGlobalSection
 EndGlobal

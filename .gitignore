@@ -12,23 +12,37 @@ obj/
 .vs/
 .vscode/
 
-# Rider / Resharper
+# Rider / ReSharper
 .idea/
 _ReSharper*/
 *.DotSettings.user
 
+# =========================
 # OS
+# =========================
 .DS_Store
 Thumbs.db
 
 # =========================
 # Secrets / config local
 # =========================
+# Exactos (por si alguien los usa)
 **/appsettings.Development.json
 **/appsettings.Local.json
-
-# Si por accidente alguien crea appsettings.Production.json local
 **/appsettings.Production.json
+
+# Variantes locales típicas
+**/appsettings.*.local.json
+**/appsettings.*.Local.json
+
+# Env files
+.env
+**/.env
+**/.env.*
+
+# Otros archivos comunes de secrets/config
+secrets.json
+**/secrets.json
 
 # =========================
 # EF / tooling
