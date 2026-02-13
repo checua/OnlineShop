@@ -1,21 +1,14 @@
-﻿using System.Security.Claims;
+﻿// src/OnlineShop.Api/Controllers/CheckoutController.cs
+using System.Security.Claims;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using OnlineShop.Api.Data;
 using OnlineShop.Api.Domain;
-using Stripe;
+using OnlineShop.Api.Options;
 using Stripe.Checkout;
 
 namespace OnlineShop.Api.Controllers;
-
-public sealed class StripeOptions
-{
-    public string SecretKey { get; set; } = "";
-    public string WebhookSecret { get; set; } = "";
-    public string FrontendBaseUrl { get; set; } = "http://localhost:3000"; // cámbialo luego
-    public string Currency { get; set; } = "MXN";
-}
 
 [ApiController]
 [Route("api/checkout")]
@@ -28,9 +21,6 @@ public sealed class CheckoutController : ControllerBase
     {
         _db = db;
         _stripe = stripe.Value;
-
-        if (!string.IsNullOrWhiteSpace(_stripe.SecretKey))
-            StripeConfiguration.ApiKey = _stripe.SecretKey;
     }
 
     public sealed record ShippingDto(
@@ -51,10 +41,32 @@ public sealed class CheckoutController : ControllerBase
 
     // POST /api/checkout/{storeSlug}/start
     [HttpPost("{storeSlug}/start")]
-    public async Task<IActionResult> Start([FromRoute] string storeSlug, [FromBody] StartCheckoutRequest req, CancellationToken ct)
+    public async Task<IActionResult> Start(
+        [FromRoute] string storeSlug,
+        [FromBody] StartCheckoutRequest req,
+        CancellationToken ct)
     {
+        if (string.IsNullOrWhiteSpace(storeSlug))
+            return BadRequest(new { error = "storeSlug requerido." });
+
+        if (req is null)
+            return BadRequest(new { error = "Body requerido." });
+
         if (string.IsNullOrWhiteSpace(req.CustomerEmail))
             return BadRequest(new { error = "CustomerEmail requerido." });
+
+        if (req.Shipping is null)
+            return BadRequest(new { error = "Shipping requerido." });
+
+        if (string.IsNullOrWhiteSpace(req.Shipping.Name) ||
+            string.IsNullOrWhiteSpace(req.Shipping.Phone) ||
+            string.IsNullOrWhiteSpace(req.Shipping.Address1) ||
+            string.IsNullOrWhiteSpace(req.Shipping.City) ||
+            string.IsNullOrWhiteSpace(req.Shipping.State) ||
+            string.IsNullOrWhiteSpace(req.Shipping.PostalCode))
+        {
+            return BadRequest(new { error = "Shipping incompleto (Name/Phone/Address1/City/State/PostalCode)." });
+        }
 
         var (userId, guestId) = ResolveActor();
         if (userId is null && guestId is null)
@@ -66,7 +78,8 @@ public sealed class CheckoutController : ControllerBase
             .Select(s => new { s.Id, s.Slug })
             .SingleOrDefaultAsync(ct);
 
-        if (store is null) return NotFound(new { error = "Store no encontrada o no aprobada." });
+        if (store is null)
+            return NotFound(new { error = "Store no encontrada o no aprobada." });
 
         // Trae carrito activo del actor
         var cart = await _db.Carts
@@ -93,7 +106,7 @@ public sealed class CheckoutController : ControllerBase
             UserId = userId,
             GuestId = guestId,
             Status = OrderStatus.PendingPayment,
-            Currency = _stripe.Currency,
+            Currency = string.IsNullOrWhiteSpace(_stripe.Currency) ? "MXN" : _stripe.Currency,
 
             Subtotal = subtotal,
             Shipping = shipping,
@@ -114,6 +127,10 @@ public sealed class CheckoutController : ControllerBase
             CreatedAt = now,
             UpdatedAt = now
         };
+
+        // Asegura colecciones (por si tus entidades no las inicializan)
+        order.Items ??= new List<OrderItem>();
+        order.Payments ??= new List<PaymentAttempt>();
 
         foreach (var ci in cart.Items)
         {
@@ -141,8 +158,8 @@ public sealed class CheckoutController : ControllerBase
 
         _db.Orders.Add(order);
 
-        // Importante: congelar carrito para que no lo editen mientras pagan
-        cart.Status = CartStatus.CheckoutPending;   // agrega este valor a tu enum (ver abajo)
+        // Congelar carrito mientras paga
+        cart.Status = CartStatus.CheckoutPending;
         cart.UpdatedAt = now;
 
         await _db.SaveChangesAsync(ct);
@@ -150,12 +167,21 @@ public sealed class CheckoutController : ControllerBase
         // ===== Stripe Checkout Session =====
         if (string.IsNullOrWhiteSpace(_stripe.SecretKey))
         {
-            // modo sin proveedor configurado (dev)
-            return Ok(new { orderId = order.Id, paymentUrl = (string?)null, note = "Stripe SecretKey no configurada." });
+            // Dev / sin proveedor configurado
+            return Ok(new
+            {
+                orderId = order.Id,
+                paymentUrl = (string?)null,
+                note = "Stripe SecretKey no configurada (modo dev)."
+            });
         }
 
-        var successUrl = $"{_stripe.FrontendBaseUrl}/checkout/success?orderId={order.Id}";
-        var cancelUrl = $"{_stripe.FrontendBaseUrl}/checkout/cancel?orderId={order.Id}";
+        var frontendBase = string.IsNullOrWhiteSpace(_stripe.FrontendBaseUrl)
+            ? "http://localhost:3000"
+            : _stripe.FrontendBaseUrl.Trim().TrimEnd('/');
+
+        var successUrl = $"{frontendBase}/checkout/success?orderId={order.Id}";
+        var cancelUrl = $"{frontendBase}/checkout/cancel?orderId={order.Id}";
 
         var sessionOptions = new SessionCreateOptions
         {
@@ -179,7 +205,9 @@ public sealed class CheckoutController : ControllerBase
                     ProductData = new SessionLineItemPriceDataProductDataOptions
                     {
                         Name = i.ProductName,
-                        Description = string.Join(" / ", new[] { i.VariantSku, i.VariantSize, i.VariantColor }.Where(x => !string.IsNullOrWhiteSpace(x))),
+                        Description = string.Join(" / ",
+                            new[] { i.VariantSku, i.VariantSize, i.VariantColor }
+                                .Where(x => !string.IsNullOrWhiteSpace(x))),
                         Images = string.IsNullOrWhiteSpace(i.ImageUrl) ? null : new List<string> { i.ImageUrl! }
                     }
                 }
