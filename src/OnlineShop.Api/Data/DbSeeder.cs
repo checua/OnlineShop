@@ -5,48 +5,111 @@ namespace OnlineShop.Api.Data;
 
 public static class DbSeeder
 {
-    public static async Task SeedAsync(OnlineShopDbContext db)
+    public static async Task SeedAsync(OnlineShopDbContext db, CancellationToken ct = default)
     {
-        // Categorías globales
-        if (!await db.StoreCategories.AnyAsync())
+        // Evita conflictos de tracking si algo ya quedó en el ChangeTracker
+        db.ChangeTracker.Clear();
+
+        // =========================
+        // 1) StoreCategories (UPSERT por Name)
+        // =========================
+        var desiredCategories = new (string Name, int SortOrder)[]
         {
-            db.StoreCategories.AddRange(
-                new StoreCategory { Name = "Moda" },
-                new StoreCategory { Name = "Zapatos" },
-                new StoreCategory { Name = "Electrónica" },
-                new StoreCategory { Name = "Hogar" },
-                new StoreCategory { Name = "Salud y Belleza" },
-                new StoreCategory { Name = "Deportes" },
-                new StoreCategory { Id = 1, Name = "Moda", SortOrder = 1 },
-                new StoreCategory { Id = 2, Name = "Calzado", SortOrder = 2 }
+            ("Moda", 0),
+            ("Calzado", 1),
+            ("Electrónica", 2),
+            ("Hogar", 3),
+            ("Salud y Belleza", 4),
+            ("Deportes", 5),
+        };
 
+        // Cargamos TRACKED para poder actualizar SortOrder si ya existe
+        var existingCats = await db.StoreCategories.ToListAsync(ct);
 
-            );
-            await db.SaveChangesAsync();
+        // Si hubiera duplicados por nombre, nos quedamos con el de menor Id
+        StoreCategory? FindCat(string name) =>
+            existingCats
+                .Where(c => c.Name != null && c.Name.Trim().Equals(name, StringComparison.OrdinalIgnoreCase))
+                .OrderBy(c => c.Id)
+                .FirstOrDefault();
+
+        foreach (var (name, sort) in desiredCategories)
+        {
+            var cat = FindCat(name);
+            if (cat is null)
+            {
+                db.StoreCategories.Add(new StoreCategory
+                {
+                    Name = name,
+                    SortOrder = sort
+                });
+            }
+            else
+            {
+                // Ajusta SortOrder si lo quieres consistente
+                if (cat.SortOrder != sort)
+                    cat.SortOrder = sort;
+
+                // Normaliza nombre (por si alguien metió espacios raros)
+                if (!string.Equals(cat.Name, name, StringComparison.Ordinal))
+                    cat.Name = name;
+            }
         }
 
-        // Tiendas demo
-        if (!await db.Stores.AnyAsync())
+        await db.SaveChangesAsync(ct);
+        db.ChangeTracker.Clear();
+
+        // Relee categorías para mapear Ids (sin tracking)
+        var cats = await db.StoreCategories.AsNoTracking().ToListAsync(ct);
+
+        int? CatId(string name) =>
+            cats
+                .Where(c => c.Name != null && c.Name.Trim().Equals(name, StringComparison.OrdinalIgnoreCase))
+                .OrderBy(c => c.Id)
+                .Select(c => (int?)c.Id)
+                .FirstOrDefault();
+
+        // =========================
+        // 2) Stores demo (UPSERT por Slug)
+        // =========================
+        var desiredStores = new (string Name, string Slug, string Status, string CategoryName)[]
         {
-            var cats = await db.StoreCategories.AsNoTracking().ToListAsync();
+            ("Zapatería Centro", "zapateria-centro", "Approved", "Calzado"),
+            ("Moda Urbana", "moda-urbana", "Approved", "Moda"),
+            ("Gadgets MX", "gadgets-mx", "Approved", "Electrónica"),
+            ("Casa & Orden", "casa-orden", "Approved", "Hogar"),
+            ("FitZone", "fitzone", "Approved", "Deportes"),
+            ("Beauty Lab", "beauty-lab", "Approved", "Salud y Belleza"),
+            ("Kicks Premium", "kicks-premium", "Approved", "Calzado"),
+            ("Tech Outlet", "tech-outlet", "Approved", "Electrónica"),
+            ("Minimal Home", "minimal-home", "Approved", "Hogar"),
+            ("Runner Pro", "runner-pro", "Approved", "Deportes"),
+        };
 
-            int Cat(string name) => cats.First(c => c.Name == name).Id;
+        var existingSlugs = new HashSet<string>(
+            await db.Stores.AsNoTracking().Select(s => s.Slug).ToListAsync(ct),
+            StringComparer.OrdinalIgnoreCase
+        );
 
-            db.Stores.AddRange(
+        var now = DateTime.UtcNow;
 
-                new Store { Name = "Zapatería Centro", Slug = "zapateria-centro", Status = "Approved", CategoryId = Cat("Zapatos") },
-                new Store { Name = "Moda Urbana", Slug = "moda-urbana", Status = "Approved", CategoryId = Cat("Moda") },
-                new Store { Name = "Gadgets MX", Slug = "gadgets-mx", Status = "Approved", CategoryId = Cat("Electrónica") },
-                new Store { Name = "Casa & Orden", Slug = "casa-orden", Status = "Approved", CategoryId = Cat("Hogar") },
-                new Store { Name = "FitZone", Slug = "fitzone", Status = "Approved", CategoryId = Cat("Deportes") },
-                new Store { Name = "Beauty Lab", Slug = "beauty-lab", Status = "Approved", CategoryId = Cat("Salud y Belleza") },
-                new Store { Name = "Kicks Premium", Slug = "kicks-premium", Status = "Approved", CategoryId = Cat("Zapatos") },
-                new Store { Name = "Tech Outlet", Slug = "tech-outlet", Status = "Approved", CategoryId = Cat("Electrónica") },
-                new Store { Name = "Minimal Home", Slug = "minimal-home", Status = "Approved", CategoryId = Cat("Hogar") },
-                new Store { Name = "Runner Pro", Slug = "runner-pro", Status = "Approved", CategoryId = Cat("Deportes") }
-            );
+        foreach (var (name, slug, status, catName) in desiredStores)
+        {
+            if (existingSlugs.Contains(slug))
+                continue;
 
-            await db.SaveChangesAsync();
+            db.Stores.Add(new Store
+            {
+                Id = Guid.NewGuid(),
+                Name = name,
+                Slug = slug,
+                Status = status,
+                CategoryId = CatId(catName),
+                CreatedAt = now
+            });
         }
+
+        await db.SaveChangesAsync(ct);
+        db.ChangeTracker.Clear();
     }
 }

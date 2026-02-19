@@ -13,13 +13,20 @@ builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
-// Stripe options (estricto en no-dev; flexible en dev para que puedas correr sin Stripe)
 builder.Services.AddOptions<StripeOptions>()
     .Bind(builder.Configuration.GetSection("Stripe"))
-    .Validate(o => builder.Environment.IsDevelopment() || !string.IsNullOrWhiteSpace(o.SecretKey),
-        "Stripe:SecretKey requerido")
-    .Validate(o => builder.Environment.IsDevelopment() || !string.IsNullOrWhiteSpace(o.WebhookSecret),
-        "Stripe:WebhookSecret requerido")
+    .Validate(o =>
+    {
+        // Permite correr sin Stripe en DEV o cuando aún no lo uses
+        if (builder.Environment.IsDevelopment()) return true;
+
+        // Si en PROD todavía no lo usarás, permite vacío (o mejor usa un flag Provider)
+        var usingStripe = builder.Configuration["Payments:Provider"] == "stripe";
+        if (!usingStripe) return true;
+
+        return !string.IsNullOrWhiteSpace(o.SecretKey)
+            && !string.IsNullOrWhiteSpace(o.WebhookSecret);
+    }, "Stripe keys requeridas si Payments:Provider=stripe")
     .ValidateOnStart();
 
 builder.Services.AddDbContext<OnlineShopDbContext>(opt =>
