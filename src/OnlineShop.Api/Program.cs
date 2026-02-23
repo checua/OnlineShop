@@ -6,6 +6,7 @@ using OnlineShop.Api.Data;
 using OnlineShop.Api.Domain;
 using OnlineShop.Api.Options;
 using Stripe;
+using OnlineShop.Api.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -47,6 +48,15 @@ builder.Services.AddIdentityCore<ApplicationUser>(opt =>
 .AddEntityFrameworkStores<OnlineShopDbContext>();
 
 builder.Services.AddHealthChecks();
+
+builder.Services.AddHttpClient();
+builder.Services.AddHttpClient<MercadoPagoClient>();
+
+builder.Services.AddOptions<MercadoPagoOptions>()
+    .Bind(builder.Configuration.GetSection("MercadoPago"))
+    .Validate(o => builder.Environment.IsDevelopment() || !string.IsNullOrWhiteSpace(o.AccessToken),
+        "MercadoPago:AccessToken requerido en PROD si se usa mercadopago")
+    .ValidateOnStart();
 
 var app = builder.Build();
 
