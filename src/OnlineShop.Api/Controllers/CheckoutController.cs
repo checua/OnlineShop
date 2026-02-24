@@ -1,11 +1,13 @@
-﻿using System.Security.Claims;
+﻿// src/OnlineShop.Api/Controllers/CheckoutController.cs
+using System.Security.Claims;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Options;
 using OnlineShop.Api.Data;
 using OnlineShop.Api.Domain;
 using OnlineShop.Api.Options;
-using OnlineShop.Api.Services;
+using Stripe;
+using Stripe.Checkout;
 
 namespace OnlineShop.Api.Controllers;
 
@@ -14,16 +16,16 @@ namespace OnlineShop.Api.Controllers;
 public sealed class CheckoutController : ControllerBase
 {
     private readonly OnlineShopDbContext _db;
-    private readonly IConfiguration _cfg;
-    private readonly MercadoPagoClient _mp;
-    private readonly MercadoPagoOptions _mpOpt;
+    private readonly StripeOptions _stripe;
 
-    public CheckoutController(OnlineShopDbContext db, IConfiguration cfg, MercadoPagoClient mp, Microsoft.Extensions.Options.IOptions<MercadoPagoOptions> mpOpt)
+    public CheckoutController(OnlineShopDbContext db, IOptions<StripeOptions> stripe)
     {
         _db = db;
-        _cfg = cfg;
-        _mp = mp;
-        _mpOpt = mpOpt.Value;
+        _stripe = stripe.Value;
+
+        // Set global (si existe)
+        if (!string.IsNullOrWhiteSpace(_stripe.SecretKey))
+            StripeConfiguration.ApiKey = _stripe.SecretKey;
     }
 
     public sealed record ShippingDto(
@@ -40,9 +42,10 @@ public sealed class CheckoutController : ControllerBase
     public sealed record StartCheckoutRequest(
         string CustomerEmail,
         ShippingDto Shipping,
-        string PaymentMethod = "manual" // "manual" | "mercadopago"
+        string PaymentMethod = "manual" // manual | stripe (por ahora)
     );
 
+    // POST /api/checkout/{storeSlug}/start
     [HttpPost("{storeSlug}/start")]
     public async Task<IActionResult> Start([FromRoute] string storeSlug, [FromBody] StartCheckoutRequest req, CancellationToken ct)
     {
@@ -59,37 +62,52 @@ public sealed class CheckoutController : ControllerBase
             .Select(s => new { s.Id, s.Slug })
             .SingleOrDefaultAsync(ct);
 
-        if (store is null) return NotFound(new { error = "Store no encontrada o no aprobada." });
+        if (store is null)
+            return NotFound(new { error = "Store no encontrada o no aprobada." });
 
-        // carrito ACTIVO (tracked) + items (no tracking)
+        // ===== Carrito ACTIVO (tracked) =====
         var cart = await _db.Carts
-            .SingleOrDefaultAsync(c => c.StoreId == store.Id && c.Status == CartStatus.Active &&
-                (userId != null ? c.UserId == userId : c.GuestId == guestId), ct);
+            .Include(c => c.Items)
+            .Where(c => c.StoreId == store.Id && c.Status == CartStatus.Active)
+            .Where(c => userId != null ? c.UserId == userId : c.GuestId == guestId)
+            .SingleOrDefaultAsync(ct);
 
-        if (cart is null) return BadRequest(new { error = "Carrito vacío o no encontrado." });
+        if (cart is null)
+        {
+            // Si existe uno CheckoutPending, dilo explícito (no “vacío”)
+            var pending = await _db.Carts.AsNoTracking()
+                .Where(c => c.StoreId == store.Id && c.Status == CartStatus.CheckoutPending)
+                .Where(c => userId != null ? c.UserId == userId : c.GuestId == guestId)
+                .Select(c => c.Id)
+                .FirstOrDefaultAsync(ct);
 
-        var items = await _db.CartItems
-            .AsNoTracking()
-            .Where(i => i.CartId == cart.Id)
-            .ToListAsync(ct);
+            if (pending != Guid.Empty)
+                return Conflict(new { error = "Carrito no está activo (CheckoutPending). Usa otro GuestId o reinicia el carrito en BD." });
 
-        if (items.Count == 0) return BadRequest(new { error = "Carrito vacío o no encontrado." });
+            return BadRequest(new { error = "Carrito vacío o no encontrado." });
+        }
+
+        if (cart.Items.Count == 0)
+            return BadRequest(new { error = "Carrito vacío o no encontrado." });
 
         var now = DateTime.UtcNow;
 
-        var subtotal = items.Sum(i => i.UnitPrice * i.Quantity);
+        // Totales desde snapshot del carrito
+        var subtotal = cart.Items.Sum(i => i.UnitPrice * i.Quantity);
         var shipping = 0m; // MVP
         var tax = 0m;      // MVP
         var total = subtotal + shipping + tax;
 
+        // ===== Crear Order en memoria (todavía NO guardamos) =====
         var order = new Order
         {
             Id = Guid.NewGuid(),
             StoreId = store.Id,
             UserId = userId,
             GuestId = guestId,
+
             Status = OrderStatus.PendingPayment,
-            Currency = _mpOpt.Currency,
+            Currency = string.IsNullOrWhiteSpace(_stripe.Currency) ? "MXN" : _stripe.Currency,
 
             Subtotal = subtotal,
             Shipping = shipping,
@@ -111,7 +129,7 @@ public sealed class CheckoutController : ControllerBase
             UpdatedAt = now
         };
 
-        foreach (var ci in items)
+        foreach (var ci in cart.Items)
         {
             order.Items.Add(new OrderItem
             {
@@ -119,6 +137,7 @@ public sealed class CheckoutController : ControllerBase
                 OrderId = order.Id,
                 ProductId = ci.ProductId,
                 VariantId = ci.VariantId,
+
                 Quantity = ci.Quantity,
                 UnitPrice = ci.UnitPrice,
                 LineTotal = ci.UnitPrice * ci.Quantity,
@@ -134,57 +153,115 @@ public sealed class CheckoutController : ControllerBase
             });
         }
 
-        _db.Orders.Add(order);
-
-        // congela carrito (sale de “Active”)
-        cart.Status = CartStatus.CheckoutPending;
-        cart.UpdatedAt = now;
-
-        await _db.SaveChangesAsync(ct);
-
-        // ===== Pago =====
+        // ===== Elegir método de pago =====
         var method = (req.PaymentMethod ?? "manual").Trim().ToLowerInvariant();
 
-        if (method == "mercadopago")
+        string provider;
+        string providerPaymentId;
+        string? providerSessionId = null;
+        string? paymentUrl = null;
+        PaymentStatus payStatus = PaymentStatus.Pending;
+
+        if (method == "manual")
         {
-            if (!_mp.IsConfigured)
-                return Ok(new { orderId = order.Id, paymentUrl = (string?)null, note = "MercadoPago AccessToken no configurado." });
+            provider = "manual";
+            providerPaymentId = $"manual-{order.Id}";
+            paymentUrl = null;
+            payStatus = PaymentStatus.Pending; // (manual = “pendiente”)
+        }
+        else if (method == "stripe")
+        {
+            provider = "stripe";
 
-            var mpItems = order.Items.Select(i =>
-                (title: i.ProductName, quantity: i.Quantity, unitPrice: i.UnitPrice, currencyId: order.Currency)).ToList();
+            if (string.IsNullOrWhiteSpace(_stripe.SecretKey))
+                return BadRequest(new { error = "Stripe no configurado (SecretKey vacío)." });
 
-            var (prefId, initPoint) = await _mp.CreatePreferenceAsync(order.Id, order.CustomerEmail, mpItems, ct);
+            var successUrl = $"{_stripe.FrontendBaseUrl}/checkout/success?orderId={order.Id}";
+            var cancelUrl = $"{_stripe.FrontendBaseUrl}/checkout/cancel?orderId={order.Id}";
 
-            order.Provider = "mercadopago";
-            order.ProviderSessionId = prefId;
-
-            order.Payments.Add(new PaymentAttempt
+            var sessionOptions = new SessionCreateOptions
             {
-                Id = Guid.NewGuid(),
-                OrderId = order.Id,
-                Provider = "mercadopago",
-                ProviderSessionId = prefId,
-                ProviderPaymentId = "",
-                Status = PaymentStatus.Pending,
-                Amount = order.Total,
-                Currency = order.Currency,
-                CreatedAt = now,
-                UpdatedAt = now
-            });
+                Mode = "payment",
+                SuccessUrl = successUrl,
+                CancelUrl = cancelUrl,
+                CustomerEmail = order.CustomerEmail,
+                ClientReferenceId = order.Id.ToString(),
+                Metadata = new Dictionary<string, string>
+                {
+                    ["orderId"] = order.Id.ToString(),
+                    ["storeId"] = store.Id.ToString()
+                },
+                LineItems = order.Items.Select(i => new SessionLineItemOptions
+                {
+                    Quantity = i.Quantity,
+                    PriceData = new SessionLineItemPriceDataOptions
+                    {
+                        Currency = order.Currency.ToLowerInvariant(),
+                        UnitAmount = (long)Math.Round(i.UnitPrice * 100m, 0, MidpointRounding.AwayFromZero),
+                        ProductData = new SessionLineItemPriceDataProductDataOptions
+                        {
+                            Name = i.ProductName,
+                            Description = string.Join(" / ",
+                                new[] { i.VariantSku, i.VariantSize, i.VariantColor }.Where(x => !string.IsNullOrWhiteSpace(x))),
+                            Images = string.IsNullOrWhiteSpace(i.ImageUrl) ? null : new List<string> { i.ImageUrl! }
+                        }
+                    }
+                }).ToList()
+            };
 
-            order.UpdatedAt = now;
-            await _db.SaveChangesAsync(ct);
+            var service = new SessionService();
+            var session = await service.CreateAsync(sessionOptions, cancellationToken: ct);
 
-            return Ok(new { orderId = order.Id, paymentUrl = initPoint, provider = "mercadopago" });
+            providerSessionId = session.Id;
+            providerPaymentId = session.PaymentIntentId ?? $"pi-pending-{order.Id}";
+            paymentUrl = session.Url;
+            payStatus = PaymentStatus.Pending;
+        }
+        else
+        {
+            return BadRequest(new { error = "paymentMethod inválido. Usa: manual | stripe" });
         }
 
-        // manual / spei etc (MVP)
+        // ===== AQUI está la corrección clave: INSERT del PaymentAttempt =====
+        order.Provider = provider;
+        order.ProviderSessionId = providerSessionId;
+        order.ProviderPaymentId = providerPaymentId;
+
+        order.Payments.Add(new PaymentAttempt
+        {
+            Id = Guid.NewGuid(),
+            OrderId = order.Id,
+            Provider = provider,
+            ProviderPaymentId = providerPaymentId,
+            ProviderSessionId = providerSessionId,
+            Status = payStatus,
+            Amount = order.Total,
+            Currency = order.Currency,
+            RawJson = null,
+            CreatedAt = now,
+            UpdatedAt = now
+        });
+
+        // Congelar carrito (ya que la orden quedó armada)
+        cart.Status = CartStatus.CheckoutPending; // asegúrate que exista en tu enum
+        cart.UpdatedAt = now;
+
+        _db.Orders.Add(order);
+
+        try
+        {
+            await _db.SaveChangesAsync(ct);
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            return Conflict(new { error = "Conflicto de concurrencia. Reintenta." });
+        }
+
         return Ok(new
         {
             orderId = order.Id,
-            provider = "manual",
-            paymentUrl = (string?)null,
-            note = "MVP: pago manual/transfer. Próximo: SPEI con referencia + confirmación."
+            provider,
+            paymentUrl
         });
     }
 

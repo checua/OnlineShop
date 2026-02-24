@@ -80,9 +80,17 @@ public sealed class MercadoPagoClient
             throw new InvalidOperationException($"MP GetPayment failed: {(int)res.StatusCode} {body}");
 
         using var doc = JsonDocument.Parse(body);
-        var status = doc.RootElement.GetProperty("status").GetString() ?? "";
-        var externalRef = doc.RootElement.TryGetProperty("external_reference", out var er) ? (er.GetString() ?? "") : "";
-        var id = doc.RootElement.TryGetProperty("id", out var pid) ? pid.GetRawText().Trim('"') : paymentId;
+
+        var status = doc.RootElement.TryGetProperty("status", out var st) ? (st.GetString() ?? "") : "";
+
+        var externalRef = doc.RootElement.TryGetProperty("external_reference", out var er)
+            ? (er.GetString() ?? "")
+            : "";
+
+        // payment id puede venir como number
+        var id = doc.RootElement.TryGetProperty("id", out var pid)
+            ? pid.ToString()
+            : paymentId;
 
         return (status, externalRef, id);
     }

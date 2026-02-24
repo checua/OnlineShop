@@ -22,7 +22,7 @@ public sealed class MercadoPagoWebhookController : ControllerBase
     [HttpPost]
     public async Task<IActionResult> Handle(CancellationToken ct)
     {
-        // MP manda muchas variantes: query data.id / id / etc.
+        // MP suele mandar data.id en query (webhook v2)
         var paymentId =
             Request.Query["data.id"].FirstOrDefault()
             ?? Request.Query["id"].FirstOrDefault();
@@ -33,7 +33,6 @@ public sealed class MercadoPagoWebhookController : ControllerBase
         if (!_mp.IsConfigured)
             return Ok();
 
-        // Verifica con API (evita spoof; webhook puede duplicarse)
         var (status, externalRef, pid) = await _mp.GetPaymentAsync(paymentId, ct);
 
         if (!Guid.TryParse(externalRef, out var orderId))
@@ -43,49 +42,66 @@ public sealed class MercadoPagoWebhookController : ControllerBase
             .Include(o => o.Payments)
             .SingleOrDefaultAsync(o => o.Id == orderId, ct);
 
-        if (order is null) return Ok();
+        if (order is null)
+            return Ok();
 
-        // Idempotencia
+        // idempotencia
         if (order.Status == OrderStatus.Paid)
             return Ok();
 
-        if (string.Equals(status, "approved", StringComparison.OrdinalIgnoreCase))
-        {
-            var now = DateTime.UtcNow;
+        // Solo aprobados marcan Paid
+        if (!string.Equals(status, "approved", StringComparison.OrdinalIgnoreCase))
+            return Ok();
 
-            order.Status = OrderStatus.Paid;
-            order.PaidAt = now;
-            order.Provider = "mercadopago";
-            order.ProviderPaymentId = pid;
+        var now = DateTime.UtcNow;
 
-            var last = order.Payments.OrderByDescending(p => p.CreatedAt).FirstOrDefault()
-                       ?? new PaymentAttempt { Id = Guid.NewGuid(), OrderId = order.Id, Provider = "mercadopago", CreatedAt = now, UpdatedAt = now, Currency = order.Currency };
+        order.Status = OrderStatus.Paid;
+        order.PaidAt = now;
+        order.Provider = "mercadopago";
+        order.ProviderPaymentId = pid;
+        order.UpdatedAt = now;
 
-            if (!order.Payments.Contains(last))
-                order.Payments.Add(last);
-
-            last.Provider = "mercadopago";
-            last.ProviderPaymentId = pid;
-            last.Status = PaymentStatus.Succeeded;
-            last.Amount = order.Total;
-            last.Currency = order.Currency;
-            last.UpdatedAt = now;
-
-            // cierra carrito pendiente (si existe)
-            var cart = await _db.Carts
-                .SingleOrDefaultAsync(c => c.StoreId == order.StoreId && c.Status == CartStatus.CheckoutPending &&
-                    (order.UserId != null ? c.UserId == order.UserId : c.GuestId == order.GuestId), ct);
-
-            if (cart != null)
+        // PaymentAttempt: marca último pending como succeeded o crea uno si no existe
+        var pay = order.Payments
+            .OrderByDescending(p => p.CreatedAt)
+            .FirstOrDefault(p => p.Provider == "mercadopago")
+            ?? new PaymentAttempt
             {
-                cart.Status = CartStatus.Completed;
-                cart.UpdatedAt = now;
-            }
+                Id = Guid.NewGuid(),
+                OrderId = order.Id,
+                Provider = "mercadopago",
+                ProviderPaymentId = $"mp:{pid}",
+                ProviderSessionId = order.ProviderSessionId,
+                Status = PaymentStatus.Pending,
+                Amount = order.Total,
+                Currency = order.Currency,
+                CreatedAt = now,
+                UpdatedAt = now
+            };
 
-            order.UpdatedAt = now;
-            await _db.SaveChangesAsync(ct);
+        if (!order.Payments.Contains(pay))
+            order.Payments.Add(pay);
+
+        pay.ProviderPaymentId = $"mp:{pid}";
+        pay.Status = PaymentStatus.Succeeded;
+        pay.Amount = order.Total;
+        pay.Currency = order.Currency;
+        pay.UpdatedAt = now;
+
+        // cierra carrito CheckoutPending
+        var cart = await _db.Carts
+            .SingleOrDefaultAsync(c =>
+                c.StoreId == order.StoreId &&
+                c.Status == CartStatus.CheckoutPending &&
+                (order.UserId != null ? c.UserId == order.UserId : c.GuestId == order.GuestId), ct);
+
+        if (cart != null)
+        {
+            cart.Status = CartStatus.Completed;
+            cart.UpdatedAt = now;
         }
 
+        await _db.SaveChangesAsync(ct);
         return Ok();
     }
 }

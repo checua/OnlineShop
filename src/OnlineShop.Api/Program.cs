@@ -1,11 +1,9 @@
-// src/OnlineShop.Api/Program.cs
-using Microsoft.EntityFrameworkCore;
 using Microsoft.Data.SqlClient;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using OnlineShop.Api.Data;
 using OnlineShop.Api.Domain;
 using OnlineShop.Api.Options;
-using Stripe;
 using OnlineShop.Api.Services;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -14,22 +12,15 @@ builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
-builder.Services.AddOptions<StripeOptions>()
-    .Bind(builder.Configuration.GetSection("Stripe"))
-    .Validate(o =>
-    {
-        // Permite correr sin Stripe en DEV o cuando aún no lo uses
-        if (builder.Environment.IsDevelopment()) return true;
-
-        // Si en PROD todavía no lo usarás, permite vacío (o mejor usa un flag Provider)
-        var usingStripe = builder.Configuration["Payments:Provider"] == "stripe";
-        if (!usingStripe) return true;
-
-        return !string.IsNullOrWhiteSpace(o.SecretKey)
-            && !string.IsNullOrWhiteSpace(o.WebhookSecret);
-    }, "Stripe keys requeridas si Payments:Provider=stripe")
+// ===== Options =====
+builder.Services.AddOptions<MercadoPagoOptions>()
+    .Bind(builder.Configuration.GetSection("MercadoPago"))
     .ValidateOnStart();
 
+// ===== Http Clients =====
+builder.Services.AddHttpClient<MercadoPagoClient>();
+
+// ===== DB (SQL Azure retry) =====
 builder.Services.AddDbContext<OnlineShopDbContext>(opt =>
     opt.UseSqlServer(
         builder.Configuration.GetConnectionString("DefaultConnection"),
@@ -40,6 +31,7 @@ builder.Services.AddDbContext<OnlineShopDbContext>(opt =>
         )
     ));
 
+// ===== Identity =====
 builder.Services.AddIdentityCore<ApplicationUser>(opt =>
 {
     opt.User.RequireUniqueEmail = true;
@@ -49,23 +41,7 @@ builder.Services.AddIdentityCore<ApplicationUser>(opt =>
 
 builder.Services.AddHealthChecks();
 
-builder.Services.AddHttpClient();
-builder.Services.AddHttpClient<MercadoPagoClient>();
-
-builder.Services.AddOptions<MercadoPagoOptions>()
-    .Bind(builder.Configuration.GetSection("MercadoPago"))
-    .Validate(o => builder.Environment.IsDevelopment() || !string.IsNullOrWhiteSpace(o.AccessToken),
-        "MercadoPago:AccessToken requerido en PROD si se usa mercadopago")
-    .ValidateOnStart();
-
 var app = builder.Build();
-
-// Set Stripe API key una sola vez (si existe)
-var stripeOpts = app.Services.GetRequiredService<IOptions<StripeOptions>>().Value;
-if (!string.IsNullOrWhiteSpace(stripeOpts.SecretKey))
-{
-    StripeConfiguration.ApiKey = stripeOpts.SecretKey;
-}
 
 // Log runtime DB (sin exponer password)
 using (var scope = app.Services.CreateScope())
@@ -75,18 +51,11 @@ using (var scope = app.Services.CreateScope())
     Console.WriteLine($"[DB-RUNTIME] Server={csb.DataSource} | Database={csb.InitialCatalog}");
 }
 
-// Seed
+// Seed (si tu DbSeeder ya maneja transient, ok)
 using (var scope = app.Services.CreateScope())
 {
     var db = scope.ServiceProvider.GetRequiredService<OnlineShopDbContext>();
-    try
-    {
-        await DbSeeder.SeedAsync(db);
-    }
-    catch (Exception ex)
-    {
-        Console.WriteLine("[SEED] " + ex.Message);
-    }
+    await DbSeeder.SeedAsync(db);
 }
 
 app.MapHealthChecks("/health");
@@ -96,11 +65,10 @@ if (app.Environment.IsDevelopment())
     app.UseSwagger();
     app.UseSwaggerUI();
 }
-
-if (!app.Environment.IsDevelopment())
+else
 {
     app.UseHttpsRedirection();
 }
-app.MapControllers();
 
+app.MapControllers();
 app.Run();
