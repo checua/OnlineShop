@@ -56,3 +56,6 @@ secrets.json
 # =========================
 publish/
 artifacts/
+
+# No subir secretos de dev
+src/OnlineShop.Api/appsettings.Development.json
