@@ -7,4 +7,6 @@
   "ConnectionStrings": {
     "DefaultConnection": ""
   }
-}
+} cd C:\Dev\OnlineShop\src\OnlineShop.Api dotnet user-secrets init dotnet user-secrets set "Jwt:Key" "MesdfR3lFa0LYf27O7+HxTVD4UeEQkOQb56Dwl/ZwQgp9vFj/nSusBpMYSk9GpyvkQNCpvLpYQ+7bshBD9CHlA==" dotnet user-secrets set "Jwt:Issuer" "OnlineShop" dotnet user-secrets set "Jwt:Audience" "OnlineShop"
+
+dotnet user-secrets set "Server=tcp:dpa6ecad46.database.windows.net,1433;Database=OnlineShopDb;User ID=onlineshop_app;Password="V9!rT2#kQ7$zN4pXh1@";Encrypt=True;TrustServerCertificate=False;Connection Timeout=30;"
