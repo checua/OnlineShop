@@ -1,0 +1,246 @@
+﻿using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
+using OnlineShop.Api.Data;
+using OnlineShop.Api.Domain;
+
+namespace OnlineShop.Api.Controllers;
+
+[ApiController]
+[Route("api/admin/orders")]
+[Authorize(Roles = "MasterAdmin,StoreOwner,Staff")]
+public sealed class AdminOrdersController : ControllerBase
+{
+    private readonly OnlineShopDbContext _db;
+    public AdminOrdersController(OnlineShopDbContext db) => _db = db;
+
+    public sealed record PagedResult<T>(int Page, int PageSize, int Total, IReadOnlyList<T> Items);
+
+    public sealed record OrderListItemDto(
+        Guid OrderId,
+        int Status,
+        DateTime CreatedAt,
+        DateTime? PaidAt,
+        decimal Total,
+        string Currency,
+        Guid StoreId,
+        string? CustomerEmail,
+        string? Provider,
+        string? ProviderPaymentId,
+        Guid? PaymentAttemptId,
+        int? PaymentStatus,
+        DateTime? PaymentCreatedAt
+    );
+
+    public sealed record PaymentAttemptDto(
+        Guid PaymentAttemptId,
+        int Status,
+        decimal Amount,
+        string Currency,
+        string Provider,
+        string ProviderPaymentId,
+        DateTime CreatedAt,
+        DateTime UpdatedAt
+    );
+
+    public sealed record OrderDetailDto(
+        Guid OrderId,
+        int Status,
+        DateTime CreatedAt,
+        DateTime? PaidAt,
+        decimal Subtotal,
+        decimal Tax,
+        decimal Total,
+        string Currency,
+        Guid StoreId,
+        string? UserId,              // Identity normalmente es string
+        string? GuestId,
+        string? CustomerEmail,
+        string? Provider,
+        string? ProviderPaymentId,
+        string? ProviderSessionId,
+        DateTime UpdatedAt,
+        IReadOnlyList<PaymentAttemptDto> PaymentAttempts
+    );
+
+    /// <summary>
+    /// Lista órdenes para backoffice.
+    /// GET /api/admin/orders?status=Paid|1&statusInt=1&storeId=...&email=...&createdFrom=...&createdTo=...&page=1&pageSize=20
+    /// Nota: si se envía statusInt, tiene prioridad sobre status.
+    /// </summary>
+    [HttpGet]
+    public async Task<ActionResult<PagedResult<OrderListItemDto>>> List(
+        [FromQuery] OrderStatus? status,
+        [FromQuery] int? statusInt,
+        [FromQuery] Guid? storeId,
+        [FromQuery] string? email,
+        [FromQuery] DateTime? createdFrom,
+        [FromQuery] DateTime? createdTo,
+        [FromQuery] int page = 1,
+        [FromQuery] int pageSize = 20,
+        CancellationToken ct = default)
+    {
+        page = page < 1 ? 1 : page;
+        pageSize = pageSize < 1 ? 20 : pageSize;
+        if (pageSize > 100) pageSize = 100;
+
+        IQueryable<Order> q = _db.Orders.AsNoTracking();
+
+        // ✅ Nuevo: statusInt tiene prioridad (útil para UI)
+        if (statusInt is not null)
+        {
+            q = q.Where(o => (int)o.Status == statusInt.Value);
+        }
+        else if (status is not null)
+        {
+            q = q.Where(o => o.Status == status.Value);
+        }
+
+        if (storeId is not null && storeId.Value != Guid.Empty)
+            q = q.Where(o => o.StoreId == storeId.Value);
+
+        if (!string.IsNullOrWhiteSpace(email))
+        {
+            var term = email.Trim();
+            q = q.Where(o => o.CustomerEmail != null && EF.Functions.Like(o.CustomerEmail, $"%{term}%"));
+        }
+
+        if (createdFrom is not null)
+            q = q.Where(o => o.CreatedAt >= createdFrom.Value);
+
+        if (createdTo is not null)
+            q = q.Where(o => o.CreatedAt <= createdTo.Value);
+
+        var total = await q.CountAsync(ct);
+
+        // Traemos un set pequeño de órdenes (paginado) primero
+        var orders = await q
+            .OrderByDescending(o => o.CreatedAt)
+            .Skip((page - 1) * pageSize)
+            .Take(pageSize)
+            .Select(o => new
+            {
+                o.Id,
+                o.Status,
+                o.CreatedAt,
+                o.PaidAt,
+                o.Total,
+                o.Currency,
+                o.StoreId,
+                o.CustomerEmail,
+                o.Provider,
+                o.ProviderPaymentId
+            })
+            .ToListAsync(ct);
+
+        var orderIds = orders.Select(x => x.Id).ToList();
+
+        // Último attempt por orden (simple y confiable)
+        var attempts = await _db.PaymentAttempts
+            .AsNoTracking()
+            .Where(p => orderIds.Contains(p.OrderId))
+            .OrderByDescending(p => p.CreatedAt)
+            .ToListAsync(ct);
+
+        var lastAttemptByOrder = new Dictionary<Guid, PaymentAttempt>();
+        foreach (var a in attempts)
+        {
+            if (!lastAttemptByOrder.ContainsKey(a.OrderId))
+                lastAttemptByOrder[a.OrderId] = a;
+        }
+
+        var items = orders.Select(o =>
+        {
+            lastAttemptByOrder.TryGetValue(o.Id, out var a);
+
+            return new OrderListItemDto(
+                o.Id,
+                (int)o.Status,
+                o.CreatedAt,
+                o.PaidAt,
+                o.Total,
+                o.Currency,
+                o.StoreId,
+                o.CustomerEmail,
+                o.Provider,
+                o.ProviderPaymentId,
+                a?.Id,
+                a is null ? null : (int)a.Status,
+                a?.CreatedAt
+            );
+        }).ToList();
+
+        return Ok(new PagedResult<OrderListItemDto>(page, pageSize, total, items));
+    }
+
+    /// <summary>
+    /// Detalle de una orden con historial de attempts.
+    /// GET /api/admin/orders/{orderId}
+    /// </summary>
+    [HttpGet("{orderId:guid}")]
+    public async Task<ActionResult<OrderDetailDto>> Get(Guid orderId, CancellationToken ct)
+    {
+        var o = await _db.Orders
+            .AsNoTracking()
+            .SingleOrDefaultAsync(x => x.Id == orderId, ct);
+
+        if (o is null)
+            return NotFound(new { error = "Order no encontrada." });
+
+        // Proyectamos a anónimo y luego mapeamos en memoria (evita expression-tree issues)
+        var attemptRows = await _db.PaymentAttempts
+            .AsNoTracking()
+            .Where(p => p.OrderId == orderId)
+            .OrderByDescending(p => p.CreatedAt)
+            .Select(p => new
+            {
+                p.Id,
+                p.Status,
+                p.Amount,
+                p.Currency,
+                p.Provider,
+                p.ProviderPaymentId,
+                p.CreatedAt,
+                p.UpdatedAt
+            })
+            .ToListAsync(ct);
+
+        var attempts = attemptRows
+            .Select(p => new PaymentAttemptDto(
+                p.Id,
+                (int)p.Status,
+                p.Amount,
+                p.Currency,
+                p.Provider,
+                p.ProviderPaymentId,
+                p.CreatedAt,
+                p.UpdatedAt
+            ))
+            .ToList();
+
+        return Ok(new OrderDetailDto(
+            OrderId: o.Id,
+            Status: (int)o.Status,
+            CreatedAt: o.CreatedAt,
+            PaidAt: o.PaidAt,
+            Subtotal: o.Subtotal,
+            Tax: o.Tax,
+            Total: o.Total,
+            Currency: o.Currency,
+            StoreId: o.StoreId,
+            UserId: o.UserId,
+            GuestId: o.GuestId,
+            CustomerEmail: o.CustomerEmail,
+            Provider: o.Provider,
+            ProviderPaymentId: o.ProviderPaymentId,
+            ProviderSessionId: o.ProviderSessionId,
+            UpdatedAt: o.UpdatedAt,
+            PaymentAttempts: attempts
+        ));
+    }
+}
