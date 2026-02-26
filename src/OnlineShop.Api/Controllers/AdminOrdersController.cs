@@ -16,6 +16,8 @@ namespace OnlineShop.Api.Controllers;
 [Authorize(Roles = "MasterAdmin,StoreOwner,Staff")]
 public sealed class AdminOrdersController : ControllerBase
 {
+    private const decimal DefaultTaxRateMx = 0.16m;
+
     private readonly OnlineShopDbContext _db;
     public AdminOrdersController(OnlineShopDbContext db) => _db = db;
 
@@ -84,6 +86,21 @@ public sealed class AdminOrdersController : ControllerBase
         DateTime UpdatedAt,
         IReadOnlyList<PaymentAttemptDto> PaymentAttempts,
         IReadOnlyList<OrderItemDto> Items
+    );
+
+    public sealed record RecalculateTotalsRequest(bool Force = false);
+
+    public sealed record RecalculateTotalsResponse(
+        Guid OrderId,
+        decimal TaxRate,
+        bool Changed,
+        decimal BeforeSubtotal,
+        decimal BeforeTax,
+        decimal BeforeTotal,
+        decimal NewSubtotal,
+        decimal NewTax,
+        decimal NewTotal,
+        string? Warning
     );
 
     /// <summary>
@@ -203,7 +220,6 @@ public sealed class AdminOrdersController : ControllerBase
         if (o is null)
             return NotFound(new { error = "Order no encontrada." });
 
-        // PaymentAttempts (proyección a anónimo y luego mapeo en memoria)
         var attemptRows = await _db.PaymentAttempts
             .AsNoTracking()
             .Where(p => p.OrderId == orderId)
@@ -234,7 +250,6 @@ public sealed class AdminOrdersController : ControllerBase
             ))
             .ToList();
 
-        // OrderItems (snapshot)
         var itemRows = await _db.OrderItems
             .AsNoTracking()
             .Where(i => i.OrderId == orderId)
@@ -297,5 +312,110 @@ public sealed class AdminOrdersController : ControllerBase
             PaymentAttempts: attempts,
             Items: orderItems
         ));
+    }
+
+    /// <summary>
+    /// Recalcula Subtotal/Tax/Total usando OrderItems (IVA 16% por ahora).
+    /// POST /api/admin/orders/{orderId}/recalculate
+    ///
+    /// Body opcional:
+    /// { "force": true|false }
+    ///
+    /// Seguridad:
+    /// - Si hay un PaymentAttempt Succeeded y el Total cambiaría, regresa 409 salvo Force=true.
+    /// </summary>
+    [HttpPost("{orderId:guid}/recalculate")]
+    [Authorize(Roles = "MasterAdmin")]
+    public async Task<IActionResult> Recalculate(Guid orderId, [FromBody] RecalculateTotalsRequest? req, CancellationToken ct)
+    {
+        var force = req?.Force ?? false;
+
+        var strategy = _db.Database.CreateExecutionStrategy();
+
+        RecalculateTotalsResponse? result = null;
+
+        await strategy.ExecuteAsync(async () =>
+        {
+            await using var tx = await _db.Database.BeginTransactionAsync(ct);
+
+            var order = await _db.Orders.SingleOrDefaultAsync(o => o.Id == orderId, ct);
+            if (order is null)
+                return;
+
+            var beforeSubtotal = order.Subtotal;
+            var beforeTax = order.Tax;
+            var beforeTotal = order.Total;
+
+            var newSubtotal = await _db.OrderItems
+                .AsNoTracking()
+                .Where(i => i.OrderId == orderId)
+                .Select(i => i.LineTotal)
+                .DefaultIfEmpty(0m)
+                .SumAsync(ct);
+
+            var newTax = Math.Round(newSubtotal * DefaultTaxRateMx, 2, MidpointRounding.AwayFromZero);
+            var newTotal = newSubtotal + newTax;
+
+            // Si ya hay pago exitoso, no permitir cambiar el total sin force
+            var hasSucceededPayment = await _db.PaymentAttempts
+                .AsNoTracking()
+                .AnyAsync(p => p.OrderId == orderId && p.Status == PaymentStatus.Succeeded, ct);
+
+            if (hasSucceededPayment && !force && newTotal != beforeTotal)
+            {
+                result = new RecalculateTotalsResponse(
+                    OrderId: order.Id,
+                    TaxRate: DefaultTaxRateMx,
+                    Changed: false,
+                    BeforeSubtotal: beforeSubtotal,
+                    BeforeTax: beforeTax,
+                    BeforeTotal: beforeTotal,
+                    NewSubtotal: newSubtotal,
+                    NewTax: newTax,
+                    NewTotal: newTotal,
+                    Warning: "Order ya tiene pago Succeeded; no se actualizó porque cambiaría el Total. Usa force=true si estás seguro."
+                );
+                await tx.CommitAsync(ct);
+                return;
+            }
+
+            var changed = (beforeSubtotal != newSubtotal) || (beforeTax != newTax) || (beforeTotal != newTotal);
+
+            if (changed)
+            {
+                order.Subtotal = newSubtotal;
+                order.Tax = newTax;
+                order.Total = newTotal;
+                order.UpdatedAt = DateTime.UtcNow;
+
+                await _db.SaveChangesAsync(ct);
+            }
+
+            await tx.CommitAsync(ct);
+
+            result = new RecalculateTotalsResponse(
+                OrderId: order.Id,
+                TaxRate: DefaultTaxRateMx,
+                Changed: changed,
+                BeforeSubtotal: beforeSubtotal,
+                BeforeTax: beforeTax,
+                BeforeTotal: beforeTotal,
+                NewSubtotal: newSubtotal,
+                NewTax: newTax,
+                NewTotal: newTotal,
+                Warning: hasSucceededPayment && force && newTotal != beforeTotal
+                    ? "Force=true aplicado: se actualizó Total a pesar de tener pago Succeeded. Verifica conciliación."
+                    : null
+            );
+        });
+
+        if (result is null)
+            return NotFound(new { error = "Order no encontrada." });
+
+        // Si trae warning por pago succeeded sin force y cambio de total -> 409
+        if (result.Warning is not null && result.Warning.StartsWith("Order ya tiene pago Succeeded"))
+            return Conflict(new { error = result.Warning, result });
+
+        return Ok(result);
     }
 }
