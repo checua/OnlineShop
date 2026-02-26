@@ -48,6 +48,23 @@ public sealed class AdminOrdersController : ControllerBase
         DateTime UpdatedAt
     );
 
+    public sealed record OrderItemDto(
+        Guid Id,
+        Guid OrderId,
+        Guid ProductId,
+        Guid? VariantId,
+        int Quantity,
+        decimal UnitPrice,
+        decimal LineTotal,
+        string ProductName,
+        string? VariantSku,
+        string? VariantSize,
+        string? VariantColor,
+        string? ImageUrl,
+        DateTime CreatedAt,
+        DateTime UpdatedAt
+    );
+
     public sealed record OrderDetailDto(
         Guid OrderId,
         int Status,
@@ -65,7 +82,8 @@ public sealed class AdminOrdersController : ControllerBase
         string? ProviderPaymentId,
         string? ProviderSessionId,
         DateTime UpdatedAt,
-        IReadOnlyList<PaymentAttemptDto> PaymentAttempts
+        IReadOnlyList<PaymentAttemptDto> PaymentAttempts,
+        IReadOnlyList<OrderItemDto> Items
     );
 
     /// <summary>
@@ -172,7 +190,7 @@ public sealed class AdminOrdersController : ControllerBase
     }
 
     /// <summary>
-    /// Detalle de una orden con historial de attempts.
+    /// Detalle de una orden con historial de attempts + items (snapshot).
     /// GET /api/admin/orders/{orderId}
     /// </summary>
     [HttpGet("{orderId:guid}")]
@@ -185,6 +203,7 @@ public sealed class AdminOrdersController : ControllerBase
         if (o is null)
             return NotFound(new { error = "Order no encontrada." });
 
+        // PaymentAttempts (proyección a anónimo y luego mapeo en memoria)
         var attemptRows = await _db.PaymentAttempts
             .AsNoTracking()
             .Where(p => p.OrderId == orderId)
@@ -215,6 +234,49 @@ public sealed class AdminOrdersController : ControllerBase
             ))
             .ToList();
 
+        // OrderItems (snapshot)
+        var itemRows = await _db.OrderItems
+            .AsNoTracking()
+            .Where(i => i.OrderId == orderId)
+            .OrderBy(i => i.CreatedAt)
+            .Select(i => new
+            {
+                i.Id,
+                i.OrderId,
+                i.ProductId,
+                i.VariantId,
+                i.Quantity,
+                i.UnitPrice,
+                i.LineTotal,
+                i.ProductName,
+                i.VariantSku,
+                i.VariantSize,
+                i.VariantColor,
+                i.ImageUrl,
+                i.CreatedAt,
+                i.UpdatedAt
+            })
+            .ToListAsync(ct);
+
+        var orderItems = itemRows
+            .Select(i => new OrderItemDto(
+                i.Id,
+                i.OrderId,
+                i.ProductId,
+                i.VariantId,
+                i.Quantity,
+                i.UnitPrice,
+                i.LineTotal,
+                i.ProductName,
+                i.VariantSku,
+                i.VariantSize,
+                i.VariantColor,
+                i.ImageUrl,
+                i.CreatedAt,
+                i.UpdatedAt
+            ))
+            .ToList();
+
         return Ok(new OrderDetailDto(
             OrderId: o.Id,
             Status: (int)o.Status,
@@ -232,7 +294,8 @@ public sealed class AdminOrdersController : ControllerBase
             ProviderPaymentId: o.ProviderPaymentId,
             ProviderSessionId: o.ProviderSessionId,
             UpdatedAt: o.UpdatedAt,
-            PaymentAttempts: attempts
+            PaymentAttempts: attempts,
+            Items: orderItems
         ));
     }
 }
