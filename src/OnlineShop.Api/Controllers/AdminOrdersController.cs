@@ -58,7 +58,7 @@ public sealed class AdminOrdersController : ControllerBase
         decimal Total,
         string Currency,
         Guid StoreId,
-        string? UserId,              // Identity normalmente es string
+        string? UserId,
         string? GuestId,
         string? CustomerEmail,
         string? Provider,
@@ -70,7 +70,7 @@ public sealed class AdminOrdersController : ControllerBase
 
     /// <summary>
     /// Lista órdenes para backoffice.
-    /// GET /api/admin/orders?status=Paid|1&statusInt=1&storeId=...&email=...&createdFrom=...&createdTo=...&page=1&pageSize=20
+    /// GET /api/admin/orders?status=Paid&statusInt=1&storeId=...&email=...&createdFrom=...&createdTo=...&page=1&pageSize=20
     /// Nota: si se envía statusInt, tiene prioridad sobre status.
     /// </summary>
     [HttpGet]
@@ -91,15 +91,10 @@ public sealed class AdminOrdersController : ControllerBase
 
         IQueryable<Order> q = _db.Orders.AsNoTracking();
 
-        // ✅ Nuevo: statusInt tiene prioridad (útil para UI)
         if (statusInt is not null)
-        {
             q = q.Where(o => (int)o.Status == statusInt.Value);
-        }
         else if (status is not null)
-        {
             q = q.Where(o => o.Status == status.Value);
-        }
 
         if (storeId is not null && storeId.Value != Guid.Empty)
             q = q.Where(o => o.StoreId == storeId.Value);
@@ -118,7 +113,6 @@ public sealed class AdminOrdersController : ControllerBase
 
         var total = await q.CountAsync(ct);
 
-        // Traemos un set pequeño de órdenes (paginado) primero
         var orders = await q
             .OrderByDescending(o => o.CreatedAt)
             .Skip((page - 1) * pageSize)
@@ -140,7 +134,6 @@ public sealed class AdminOrdersController : ControllerBase
 
         var orderIds = orders.Select(x => x.Id).ToList();
 
-        // Último attempt por orden (simple y confiable)
         var attempts = await _db.PaymentAttempts
             .AsNoTracking()
             .Where(p => orderIds.Contains(p.OrderId))
@@ -192,7 +185,6 @@ public sealed class AdminOrdersController : ControllerBase
         if (o is null)
             return NotFound(new { error = "Order no encontrada." });
 
-        // Proyectamos a anónimo y luego mapeamos en memoria (evita expression-tree issues)
         var attemptRows = await _db.PaymentAttempts
             .AsNoTracking()
             .Where(p => p.OrderId == orderId)
