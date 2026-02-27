@@ -13,6 +13,8 @@ var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
+builder.Services.Configure<OnlineShop.Api.Options.TaxOptions>(
+    builder.Configuration.GetSection("Tax"));
 
 // ===== Swagger (incluye Bearer Auth) =====
 builder.Services.AddSwaggerGen(c =>
