@@ -103,11 +103,6 @@ public sealed class AdminOrdersController : ControllerBase
         string? Warning
     );
 
-    /// <summary>
-    /// Lista órdenes para backoffice.
-    /// GET /api/admin/orders?status=Paid&statusInt=1&storeId=...&email=...&createdFrom=...&createdTo=...&page=1&pageSize=20
-    /// Nota: si se envía statusInt, tiene prioridad sobre status.
-    /// </summary>
     [HttpGet]
     public async Task<ActionResult<PagedResult<OrderListItemDto>>> List(
         [FromQuery] OrderStatus? status,
@@ -206,10 +201,6 @@ public sealed class AdminOrdersController : ControllerBase
         return Ok(new PagedResult<OrderListItemDto>(page, pageSize, total, items));
     }
 
-    /// <summary>
-    /// Detalle de una orden con historial de attempts + items (snapshot).
-    /// GET /api/admin/orders/{orderId}
-    /// </summary>
     [HttpGet("{orderId:guid}")]
     public async Task<ActionResult<OrderDetailDto>> Get(Guid orderId, CancellationToken ct)
     {
@@ -314,16 +305,6 @@ public sealed class AdminOrdersController : ControllerBase
         ));
     }
 
-    /// <summary>
-    /// Recalcula Subtotal/Tax/Total usando OrderItems (IVA 16% por ahora).
-    /// POST /api/admin/orders/{orderId}/recalculate
-    ///
-    /// Body opcional:
-    /// { "force": true|false }
-    ///
-    /// Seguridad:
-    /// - Si hay un PaymentAttempt Succeeded y el Total cambiaría, regresa 409 salvo Force=true.
-    /// </summary>
     [HttpPost("{orderId:guid}/recalculate")]
     [Authorize(Roles = "MasterAdmin")]
     public async Task<IActionResult> Recalculate(Guid orderId, [FromBody] RecalculateTotalsRequest? req, CancellationToken ct)
@@ -331,7 +312,6 @@ public sealed class AdminOrdersController : ControllerBase
         var force = req?.Force ?? false;
 
         var strategy = _db.Database.CreateExecutionStrategy();
-
         RecalculateTotalsResponse? result = null;
 
         await strategy.ExecuteAsync(async () =>
@@ -346,17 +326,23 @@ public sealed class AdminOrdersController : ControllerBase
             var beforeTax = order.Tax;
             var beforeTotal = order.Total;
 
-            var newSubtotal = await _db.OrderItems
+            // Subtotal en memoria (EF-safe)
+            var lineTotals = await _db.OrderItems
                 .AsNoTracking()
                 .Where(i => i.OrderId == orderId)
                 .Select(i => i.LineTotal)
-                .DefaultIfEmpty(0m)
-                .SumAsync(ct);
+                .ToListAsync(ct);
 
-            var newTax = Math.Round(newSubtotal * DefaultTaxRateMx, 2, MidpointRounding.AwayFromZero);
+            var newSubtotal = lineTotals.Sum();
+
+            // ✅ Multi-país base: por ahora solo aplica IVA 16% si Currency == "MXN"
+            var taxRate = string.Equals(order.Currency, "MXN", StringComparison.OrdinalIgnoreCase)
+                ? DefaultTaxRateMx
+                : 0m;
+
+            var newTax = Math.Round(newSubtotal * taxRate, 2, MidpointRounding.AwayFromZero);
             var newTotal = newSubtotal + newTax;
 
-            // Si ya hay pago exitoso, no permitir cambiar el total sin force
             var hasSucceededPayment = await _db.PaymentAttempts
                 .AsNoTracking()
                 .AnyAsync(p => p.OrderId == orderId && p.Status == PaymentStatus.Succeeded, ct);
@@ -365,7 +351,7 @@ public sealed class AdminOrdersController : ControllerBase
             {
                 result = new RecalculateTotalsResponse(
                     OrderId: order.Id,
-                    TaxRate: DefaultTaxRateMx,
+                    TaxRate: taxRate,
                     Changed: false,
                     BeforeSubtotal: beforeSubtotal,
                     BeforeTax: beforeTax,
@@ -375,6 +361,7 @@ public sealed class AdminOrdersController : ControllerBase
                     NewTotal: newTotal,
                     Warning: "Order ya tiene pago Succeeded; no se actualizó porque cambiaría el Total. Usa force=true si estás seguro."
                 );
+
                 await tx.CommitAsync(ct);
                 return;
             }
@@ -395,7 +382,7 @@ public sealed class AdminOrdersController : ControllerBase
 
             result = new RecalculateTotalsResponse(
                 OrderId: order.Id,
-                TaxRate: DefaultTaxRateMx,
+                TaxRate: taxRate,
                 Changed: changed,
                 BeforeSubtotal: beforeSubtotal,
                 BeforeTax: beforeTax,
@@ -412,7 +399,6 @@ public sealed class AdminOrdersController : ControllerBase
         if (result is null)
             return NotFound(new { error = "Order no encontrada." });
 
-        // Si trae warning por pago succeeded sin force y cambio de total -> 409
         if (result.Warning is not null && result.Warning.StartsWith("Order ya tiene pago Succeeded"))
             return Conflict(new { error = result.Warning, result });
 
