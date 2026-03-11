@@ -17,11 +17,16 @@ public sealed class CheckoutController : ControllerBase
 {
     private readonly OnlineShopDbContext _db;
     private readonly StripeOptions _stripe;
+    private readonly TaxOptions _tax;
 
-    public CheckoutController(OnlineShopDbContext db, IOptions<StripeOptions> stripe)
+    public CheckoutController(
+        OnlineShopDbContext db,
+        IOptions<StripeOptions> stripe,
+        IOptions<TaxOptions> taxOptions)
     {
         _db = db;
         _stripe = stripe.Value;
+        _tax = taxOptions.Value;
 
         // Set global (si existe)
         if (!string.IsNullOrWhiteSpace(_stripe.SecretKey))
@@ -92,11 +97,24 @@ public sealed class CheckoutController : ControllerBase
 
         var now = DateTime.UtcNow;
 
-        // Totales desde snapshot del carrito
-        var subtotal = cart.Items.Sum(i => i.UnitPrice * i.Quantity);
+        // Currency (por ahora desde StripeOptions; sirve para manual también)
+        var currency = string.IsNullOrWhiteSpace(_stripe.Currency) ? "MXN" : _stripe.Currency.Trim().ToUpperInvariant();
+
+        // ===== Totales (con TaxOptions) =====
+        // Congelamos lineTotals con redondeo consistente (2 decimales, AwayFromZero)
+        var cartLines = cart.Items.Select(ci => new
+        {
+            ci,
+            LineTotal = Round2(ci.UnitPrice * ci.Quantity)
+        }).ToList();
+
+        var subtotal = Round2(cartLines.Sum(x => x.LineTotal));
         var shipping = 0m; // MVP
-        var tax = 0m;      // MVP
-        var total = subtotal + shipping + tax;
+        var taxRate = _tax.GetRate(currency);
+        var tax = Round2(subtotal * taxRate);
+
+        // Total SIEMPRE = Subtotal + Shipping + Tax
+        var total = Round2(subtotal + shipping + tax);
 
         // ===== Crear Order en memoria (todavía NO guardamos) =====
         var order = new Order
@@ -107,7 +125,7 @@ public sealed class CheckoutController : ControllerBase
             GuestId = guestId,
 
             Status = OrderStatus.PendingPayment,
-            Currency = string.IsNullOrWhiteSpace(_stripe.Currency) ? "MXN" : _stripe.Currency,
+            Currency = currency,
 
             Subtotal = subtotal,
             Shipping = shipping,
@@ -129,8 +147,11 @@ public sealed class CheckoutController : ControllerBase
             UpdatedAt = now
         };
 
-        foreach (var ci in cart.Items)
+        // Items snapshot
+        foreach (var x in cartLines)
         {
+            var ci = x.ci;
+
             order.Items.Add(new OrderItem
             {
                 Id = Guid.NewGuid(),
@@ -140,7 +161,7 @@ public sealed class CheckoutController : ControllerBase
 
                 Quantity = ci.Quantity,
                 UnitPrice = ci.UnitPrice,
-                LineTotal = ci.UnitPrice * ci.Quantity,
+                LineTotal = x.LineTotal,
 
                 ProductName = ci.ProductName,
                 VariantSku = ci.VariantSku,
@@ -167,7 +188,7 @@ public sealed class CheckoutController : ControllerBase
             provider = "manual";
             providerPaymentId = $"manual-{order.Id}";
             paymentUrl = null;
-            payStatus = PaymentStatus.Pending; // (manual = “pendiente”)
+            payStatus = PaymentStatus.Pending; // manual = “pendiente”
         }
         else if (method == "stripe")
         {
@@ -179,6 +200,59 @@ public sealed class CheckoutController : ControllerBase
             var successUrl = $"{_stripe.FrontendBaseUrl}/checkout/success?orderId={order.Id}";
             var cancelUrl = $"{_stripe.FrontendBaseUrl}/checkout/cancel?orderId={order.Id}";
 
+            // Stripe: asegurar que el cobro coincida con order.Total.
+            // Como Shipping y Tax no están modelados como “automatic tax” aquí, los metemos como line items extra si aplica.
+            var lineItems = order.Items.Select(i => new SessionLineItemOptions
+            {
+                Quantity = i.Quantity,
+                PriceData = new SessionLineItemPriceDataOptions
+                {
+                    Currency = order.Currency.ToLowerInvariant(),
+                    UnitAmount = ToMinor(i.UnitPrice),
+                    ProductData = new SessionLineItemPriceDataProductDataOptions
+                    {
+                        Name = i.ProductName,
+                        Description = string.Join(" / ",
+                            new[] { i.VariantSku, i.VariantSize, i.VariantColor }.Where(x => !string.IsNullOrWhiteSpace(x))),
+                        Images = string.IsNullOrWhiteSpace(i.ImageUrl) ? null : new List<string> { i.ImageUrl! }
+                    }
+                }
+            }).ToList();
+
+            if (order.Shipping > 0m)
+            {
+                lineItems.Add(new SessionLineItemOptions
+                {
+                    Quantity = 1,
+                    PriceData = new SessionLineItemPriceDataOptions
+                    {
+                        Currency = order.Currency.ToLowerInvariant(),
+                        UnitAmount = ToMinor(order.Shipping),
+                        ProductData = new SessionLineItemPriceDataProductDataOptions
+                        {
+                            Name = "Envío"
+                        }
+                    }
+                });
+            }
+
+            if (order.Tax > 0m)
+            {
+                lineItems.Add(new SessionLineItemOptions
+                {
+                    Quantity = 1,
+                    PriceData = new SessionLineItemPriceDataOptions
+                    {
+                        Currency = order.Currency.ToLowerInvariant(),
+                        UnitAmount = ToMinor(order.Tax),
+                        ProductData = new SessionLineItemPriceDataProductDataOptions
+                        {
+                            Name = "IVA"
+                        }
+                    }
+                });
+            }
+
             var sessionOptions = new SessionCreateOptions
             {
                 Mode = "payment",
@@ -189,24 +263,11 @@ public sealed class CheckoutController : ControllerBase
                 Metadata = new Dictionary<string, string>
                 {
                     ["orderId"] = order.Id.ToString(),
-                    ["storeId"] = store.Id.ToString()
+                    ["storeId"] = store.Id.ToString(),
+                    ["currency"] = order.Currency,
+                    ["taxRate"] = taxRate.ToString(System.Globalization.CultureInfo.InvariantCulture)
                 },
-                LineItems = order.Items.Select(i => new SessionLineItemOptions
-                {
-                    Quantity = i.Quantity,
-                    PriceData = new SessionLineItemPriceDataOptions
-                    {
-                        Currency = order.Currency.ToLowerInvariant(),
-                        UnitAmount = (long)Math.Round(i.UnitPrice * 100m, 0, MidpointRounding.AwayFromZero),
-                        ProductData = new SessionLineItemPriceDataProductDataOptions
-                        {
-                            Name = i.ProductName,
-                            Description = string.Join(" / ",
-                                new[] { i.VariantSku, i.VariantSize, i.VariantColor }.Where(x => !string.IsNullOrWhiteSpace(x))),
-                            Images = string.IsNullOrWhiteSpace(i.ImageUrl) ? null : new List<string> { i.ImageUrl! }
-                        }
-                    }
-                }).ToList()
+                LineItems = lineItems
             };
 
             var service = new SessionService();
@@ -222,7 +283,7 @@ public sealed class CheckoutController : ControllerBase
             return BadRequest(new { error = "paymentMethod inválido. Usa: manual | stripe" });
         }
 
-        // ===== AQUI está la corrección clave: INSERT del PaymentAttempt =====
+        // ===== PaymentAttempt =====
         order.Provider = provider;
         order.ProviderSessionId = providerSessionId;
         order.ProviderPaymentId = providerPaymentId;
@@ -242,8 +303,8 @@ public sealed class CheckoutController : ControllerBase
             UpdatedAt = now
         });
 
-        // Congelar carrito (ya que la orden quedó armada)
-        cart.Status = CartStatus.CheckoutPending; // asegúrate que exista en tu enum
+        // Congelar carrito
+        cart.Status = CartStatus.CheckoutPending;
         cart.UpdatedAt = now;
 
         _db.Orders.Add(order);
@@ -261,7 +322,12 @@ public sealed class CheckoutController : ControllerBase
         {
             orderId = order.Id,
             provider,
-            paymentUrl
+            paymentUrl,
+            currency = order.Currency,
+            taxRate,
+            subtotal = order.Subtotal,
+            tax = order.Tax,
+            total = order.Total
         });
     }
 
@@ -280,4 +346,10 @@ public sealed class CheckoutController : ControllerBase
 
         return (userId, guestId);
     }
+
+    private static decimal Round2(decimal v)
+        => Math.Round(v, 2, MidpointRounding.AwayFromZero);
+
+    private static long ToMinor(decimal amount)
+        => (long)Math.Round(amount * 100m, 0, MidpointRounding.AwayFromZero);
 }
