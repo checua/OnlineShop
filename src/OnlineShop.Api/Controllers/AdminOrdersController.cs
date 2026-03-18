@@ -6,8 +6,10 @@ using System.Threading.Tasks;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 using OnlineShop.Api.Data;
 using OnlineShop.Api.Domain;
+using OnlineShop.Api.Options;
 
 namespace OnlineShop.Api.Controllers;
 
@@ -16,10 +18,14 @@ namespace OnlineShop.Api.Controllers;
 [Authorize(Roles = "MasterAdmin,StoreOwner,Staff")]
 public sealed class AdminOrdersController : ControllerBase
 {
-    private const decimal DefaultTaxRateMx = 0.16m;
-
     private readonly OnlineShopDbContext _db;
-    public AdminOrdersController(OnlineShopDbContext db) => _db = db;
+    private readonly TaxOptions _tax;
+
+    public AdminOrdersController(OnlineShopDbContext db, IOptions<TaxOptions> taxOptions)
+    {
+        _db = db;
+        _tax = taxOptions.Value;
+    }
 
     public sealed record PagedResult<T>(int Page, int PageSize, int Total, IReadOnlyList<T> Items);
 
@@ -335,13 +341,14 @@ public sealed class AdminOrdersController : ControllerBase
 
             var newSubtotal = lineTotals.Sum();
 
-            // ✅ Multi-país base: por ahora solo aplica IVA 16% si Currency == "MXN"
-            var taxRate = string.Equals(order.Currency, "MXN", StringComparison.OrdinalIgnoreCase)
-                ? DefaultTaxRateMx
-                : 0m;
+            // ✅ Base multi-país: IVA configurable por Currency (TaxOptions)
+            var taxRate = _tax.GetRate(order.Currency);
 
             var newTax = Math.Round(newSubtotal * taxRate, 2, MidpointRounding.AwayFromZero);
-            var newTotal = newSubtotal + newTax;
+
+            // Total SIEMPRE = Subtotal + Shipping + Tax (Shipping existe en tu tabla SHOP.Orders)
+            var shipping = order.Shipping; // si tu entidad Order no tiene Shipping, dime el nombre real y lo ajusto
+            var newTotal = newSubtotal + shipping + newTax;
 
             var hasSucceededPayment = await _db.PaymentAttempts
                 .AsNoTracking()
