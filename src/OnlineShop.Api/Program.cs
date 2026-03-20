@@ -1,4 +1,4 @@
-using Microsoft.AspNetCore.Authentication.JwtBearer;
+﻿using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
@@ -11,8 +11,15 @@ using System.Text;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// ✅ Force-load User Secrets in Development (ensures Stripe:SecretKey is read)
+if (builder.Environment.IsDevelopment())
+{
+    builder.Configuration.AddUserSecrets<Program>(optional: true);
+}
+
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
+
 builder.Services.Configure<TaxOptions>(builder.Configuration.GetSection("Tax"));
 
 // ===== Swagger (incluye Bearer Auth) =====
@@ -48,6 +55,11 @@ builder.Services.AddOptions<MercadoPagoOptions>()
     .Bind(builder.Configuration.GetSection("MercadoPago"))
     .ValidateOnStart();
 
+// ✅ Stripe Options (needed for CheckoutController/StripeWebhookController)
+builder.Services.AddOptions<StripeOptions>()
+    .Bind(builder.Configuration.GetSection("Stripe"))
+    .ValidateOnStart();
+
 // ===== Http Clients =====
 builder.Services.AddHttpClient<MercadoPagoClient>();
 
@@ -78,8 +90,8 @@ builder.Services
         var key = builder.Configuration["Jwt:Key"];
         if (string.IsNullOrWhiteSpace(key))
         {
-            // En dev te conviene que reviente claro para que no quede �falso protegido�
-            throw new InvalidOperationException("Falta configuraci�n Jwt:Key. Agrega Jwt:Key en appsettings.Development.json (recomendado) o appsettings.json.");
+            // En dev te conviene que reviente claro para que no quede “falso protegido”
+            throw new InvalidOperationException("Falta configuración Jwt:Key. Agrega Jwt:Key en appsettings.Development.json (recomendado) o appsettings.json.");
         }
 
         options.TokenValidationParameters = new TokenValidationParameters
@@ -98,7 +110,6 @@ builder.Services
     });
 
 builder.Services.AddAuthorization();
-
 builder.Services.AddHealthChecks();
 
 var app = builder.Build();
@@ -109,6 +120,13 @@ using (var scope = app.Services.CreateScope())
     var db = scope.ServiceProvider.GetRequiredService<OnlineShopDbContext>();
     var csb = new SqlConnectionStringBuilder(db.Database.GetDbConnection().ConnectionString);
     Console.WriteLine($"[DB-RUNTIME] Server={csb.DataSource} | Database={csb.InitialCatalog}");
+}
+
+// (Opcional) Log rápido Stripe config (NO imprime la key)
+using (var scope = app.Services.CreateScope())
+{
+    var stripe = scope.ServiceProvider.GetRequiredService<Microsoft.Extensions.Options.IOptions<StripeOptions>>().Value;
+    Console.WriteLine($"[STRIPE] SecretKey loaded? {!string.IsNullOrWhiteSpace(stripe.SecretKey)} | WebhookSecret loaded? {!string.IsNullOrWhiteSpace(stripe.WebhookSecret)}");
 }
 
 // Seed

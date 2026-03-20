@@ -202,21 +202,31 @@ public sealed class CheckoutController : ControllerBase
 
             // Stripe: asegurar que el cobro coincida con order.Total.
             // Como Shipping y Tax no están modelados como “automatic tax” aquí, los metemos como line items extra si aplica.
-            var lineItems = order.Items.Select(i => new SessionLineItemOptions
+            var lineItems = order.Items.Select(i =>
             {
-                Quantity = i.Quantity,
-                PriceData = new SessionLineItemPriceDataOptions
+                // Stripe NO acepta description="" -> si no hay descripción, debe ser null/omitida
+                var desc = string.Join(" / ",
+                    new[] { i.VariantSku, i.VariantSize, i.VariantColor }
+                        .Where(x => !string.IsNullOrWhiteSpace(x)));
+
+                if (string.IsNullOrWhiteSpace(desc))
+                    desc = null;
+
+                return new SessionLineItemOptions
                 {
-                    Currency = order.Currency.ToLowerInvariant(),
-                    UnitAmount = ToMinor(i.UnitPrice),
-                    ProductData = new SessionLineItemPriceDataProductDataOptions
+                    Quantity = i.Quantity,
+                    PriceData = new SessionLineItemPriceDataOptions
                     {
-                        Name = i.ProductName,
-                        Description = string.Join(" / ",
-                            new[] { i.VariantSku, i.VariantSize, i.VariantColor }.Where(x => !string.IsNullOrWhiteSpace(x))),
-                        Images = string.IsNullOrWhiteSpace(i.ImageUrl) ? null : new List<string> { i.ImageUrl! }
+                        Currency = order.Currency.ToLowerInvariant(),
+                        UnitAmount = ToMinor(i.UnitPrice),
+                        ProductData = new SessionLineItemPriceDataProductDataOptions
+                        {
+                            Name = string.IsNullOrWhiteSpace(i.ProductName) ? "Item" : i.ProductName,
+                            Description = desc,
+                            Images = string.IsNullOrWhiteSpace(i.ImageUrl) ? null : new List<string> { i.ImageUrl! }
+                        }
                     }
-                }
+                };
             }).ToList();
 
             if (order.Shipping > 0m)
@@ -231,6 +241,7 @@ public sealed class CheckoutController : ControllerBase
                         ProductData = new SessionLineItemPriceDataProductDataOptions
                         {
                             Name = "Envío"
+                            // Description omitida
                         }
                     }
                 });
@@ -248,6 +259,7 @@ public sealed class CheckoutController : ControllerBase
                         ProductData = new SessionLineItemPriceDataProductDataOptions
                         {
                             Name = "IVA"
+                            // Description omitida
                         }
                     }
                 });

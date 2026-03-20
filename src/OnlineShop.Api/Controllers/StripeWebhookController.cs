@@ -17,11 +17,16 @@ public sealed class StripeWebhookController : ControllerBase
 {
     private readonly OnlineShopDbContext _db;
     private readonly StripeOptions _stripe;
+    private readonly ILogger<StripeWebhookController> _logger;
 
-    public StripeWebhookController(OnlineShopDbContext db, IOptions<StripeOptions> stripe)
+    public StripeWebhookController(
+        OnlineShopDbContext db,
+        IOptions<StripeOptions> stripe,
+        ILogger<StripeWebhookController> logger)
     {
         _db = db;
         _stripe = stripe.Value;
+        _logger = logger;
 
         if (!string.IsNullOrWhiteSpace(_stripe.SecretKey))
             StripeConfiguration.ApiKey = _stripe.SecretKey;
@@ -30,10 +35,8 @@ public sealed class StripeWebhookController : ControllerBase
     [HttpPost]
     public async Task<IActionResult> Handle(CancellationToken ct)
     {
-        // 1) Leer raw body (Stripe firma el raw string)
         var json = await new StreamReader(Request.Body).ReadToEndAsync(ct);
 
-        // 2) Construir evento (con firma si existe WebhookSecret)
         Event stripeEvent;
         try
         {
@@ -44,23 +47,26 @@ public sealed class StripeWebhookController : ControllerBase
                 stripeEvent = EventUtility.ConstructEvent(
                     json,
                     sigHeader,
-                    _stripe.WebhookSecret
+                    _stripe.WebhookSecret,
+                    throwOnApiVersionMismatch: false
                 );
             }
             else
             {
-                // Dev fallback (NO recomendado en prod)
+                // Solo fallback de desarrollo
                 stripeEvent = EventUtility.ParseEvent(json);
             }
         }
         catch (Exception ex)
         {
-            // Firma inválida o payload corrupto
-            return BadRequest(new { error = "Invalid Stripe webhook.", detail = ex.Message });
+            _logger.LogWarning(ex, "Invalid Stripe webhook. Body: {Body}", json);
+            return BadRequest(new
+            {
+                error = "Invalid Stripe webhook.",
+                detail = ex.Message
+            });
         }
 
-        // 3) Procesar SOLO lo necesario (Checkout Session)
-        // Usamos checkout.session.completed porque ahí tenemos client_reference_id=OrderId y metadata.
         const string CheckoutSessionCompleted = "checkout.session.completed";
         const string CheckoutSessionAsyncSucceeded = "checkout.session.async_payment_succeeded";
 
@@ -68,19 +74,20 @@ public sealed class StripeWebhookController : ControllerBase
         {
             var session = stripeEvent.Data.Object as Session;
             if (session is null)
+            {
+                _logger.LogInformation(
+                    "Stripe event {EventType} parsed but Session was null.",
+                    stripeEvent.Type
+                );
                 return Ok();
+            }
 
-            // Para mode=payment: solo continuar si está pagada
-            // (En async, también llega como paid)
             if (!string.Equals(session.Mode, "payment", StringComparison.OrdinalIgnoreCase))
                 return Ok();
 
-            // Stripe usa "paid"/"unpaid"
             if (!string.Equals(session.PaymentStatus, "paid", StringComparison.OrdinalIgnoreCase))
                 return Ok();
 
-            // 4) Localizar PaymentAttempt/Order
-            // Preferimos ProviderSessionId=session.Id (porque nosotros lo guardamos)
             var attempt = await _db.PaymentAttempts
                 .OrderByDescending(p => p.CreatedAt)
                 .FirstOrDefaultAsync(p =>
@@ -90,33 +97,52 @@ public sealed class StripeWebhookController : ControllerBase
 
             if (attempt is null)
             {
-                // No tenemos un attempt para este evento -> aceptamos para evitar retries infinitos,
-                // pero en prod conviene log/bitácora.
+                _logger.LogInformation(
+                    "Stripe webhook accepted but no PaymentAttempt found. SessionId={SessionId}, PaymentIntentId={PaymentIntentId}",
+                    session.Id,
+                    session.PaymentIntentId
+                );
                 return Ok();
             }
 
             var order = await _db.Orders.SingleOrDefaultAsync(o => o.Id == attempt.OrderId, ct);
             if (order is null)
+            {
+                _logger.LogInformation(
+                    "Stripe webhook accepted but Order not found for attempt {AttemptId}.",
+                    attempt.Id
+                );
                 return Ok();
+            }
 
-            // 5) Idempotencia: si ya está pagada + attempt succeeded, no tocar
-            if (order.PaidAt is not null && order.Status == OrderStatus.Paid && attempt.Status == PaymentStatus.Succeeded)
+            if (order.PaidAt is not null &&
+                order.Status == OrderStatus.Paid &&
+                attempt.Status == PaymentStatus.Succeeded)
+            {
                 return Ok();
+            }
 
-            // 6) Validación cruzada monto/moneda (Stripe viene en cents)
-            // session.AmountTotal puede ser null en algunos edge cases, pero normalmente viene.
-            var stripeCurrency = (session.Currency ?? "").Trim().ToUpperInvariant();
+            var stripeCurrency = (session.Currency ?? string.Empty).Trim().ToUpperInvariant();
             var stripeAmount = session.AmountTotal.HasValue
                 ? Math.Round(session.AmountTotal.Value / 100m, 2, MidpointRounding.AwayFromZero)
                 : (decimal?)null;
 
-            // Si Stripe sí manda monto/moneda, exigimos match.
             if (stripeAmount.HasValue)
             {
-                if (!string.Equals(stripeCurrency, order.Currency?.Trim().ToUpperInvariant(), StringComparison.OrdinalIgnoreCase) ||
+                var orderCurrency = (order.Currency ?? string.Empty).Trim().ToUpperInvariant();
+
+                if (!string.Equals(stripeCurrency, orderCurrency, StringComparison.OrdinalIgnoreCase) ||
                     stripeAmount.Value != order.Total)
                 {
-                    // No marcamos pagada si no cuadra (evita fraudes/mala config)
+                    _logger.LogWarning(
+                        "Stripe amount/currency mismatch. OrderId={OrderId}, OrderTotal={OrderTotal}, OrderCurrency={OrderCurrency}, StripeAmount={StripeAmount}, StripeCurrency={StripeCurrency}",
+                        order.Id,
+                        order.Total,
+                        order.Currency,
+                        stripeAmount.Value,
+                        stripeCurrency
+                    );
+
                     return Conflict(new
                     {
                         error = "Amount/currency mismatch.",
@@ -128,11 +154,11 @@ public sealed class StripeWebhookController : ControllerBase
                 }
             }
 
-            // 7) Marcar succeeded + order paid + cerrar carrito
             var now = DateTime.UtcNow;
 
             attempt.Status = PaymentStatus.Succeeded;
             attempt.ProviderSessionId = session.Id;
+
             if (!string.IsNullOrWhiteSpace(session.PaymentIntentId))
                 attempt.ProviderPaymentId = session.PaymentIntentId;
 
@@ -149,12 +175,19 @@ public sealed class StripeWebhookController : ControllerBase
             order.UpdatedAt = now;
 
             await CloseCheckoutPendingCartAsync(order, now, ct);
-
             await _db.SaveChangesAsync(ct);
+
+            _logger.LogInformation(
+                "Stripe webhook processed successfully. OrderId={OrderId}, SessionId={SessionId}, PaymentIntentId={PaymentIntentId}",
+                order.Id,
+                session.Id,
+                session.PaymentIntentId
+            );
+
             return Ok();
         }
 
-        // Ignorar demás eventos por ahora (pero responder 200 para que Stripe no reintente)
+        // Eventos no usados por ahora: responder 200 para evitar reintentos inútiles
         return Ok();
     }
 
