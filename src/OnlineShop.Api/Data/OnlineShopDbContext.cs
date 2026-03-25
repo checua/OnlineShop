@@ -27,10 +27,13 @@ public sealed class OnlineShopDbContext
     public DbSet<Cart> Carts => Set<Cart>();
     public DbSet<CartItem> CartItems => Set<CartItem>();
 
-    // ===== Orders (0008) =====
+    // ===== Orders =====
     public DbSet<Order> Orders => Set<Order>();
     public DbSet<OrderItem> OrderItems => Set<OrderItem>();
     public DbSet<PaymentAttempt> PaymentAttempts => Set<PaymentAttempt>();
+
+    // ===== Webhook Inbox / Idempotencia =====
+    public DbSet<ProcessedWebhookEvent> ProcessedWebhookEvents => Set<ProcessedWebhookEvent>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -72,7 +75,6 @@ public sealed class OnlineShopDbContext
 
             b.HasIndex(x => x.Slug).IsUnique();
 
-            // Store.CategoryId -> StoreCategory (opcional)
             b.HasOne(x => x.Category)
                 .WithMany()
                 .HasForeignKey(x => x.CategoryId)
@@ -104,7 +106,6 @@ public sealed class OnlineShopDbContext
             b.HasIndex(x => x.StoreId);
             b.HasIndex(x => new { x.StoreId, x.IsActive });
 
-            // clave para evitar multiple cascade paths
             b.HasOne(x => x.Store)
               .WithMany()
               .HasForeignKey(x => x.StoreId)
@@ -172,18 +173,15 @@ public sealed class OnlineShopDbContext
                 .HasForeignKey(i => i.CartId)
                 .OnDelete(DeleteBehavior.Cascade);
 
-            // Store FK
             b.HasOne<Store>()
                 .WithMany()
                 .HasForeignKey(x => x.StoreId)
                 .OnDelete(DeleteBehavior.Cascade);
 
-            // 1 carrito ACTIVO por (StoreId + UserId)
             b.HasIndex(x => new { x.StoreId, x.UserId })
                 .IsUnique()
                 .HasFilter("[UserId] IS NOT NULL AND [Status] = 0");
 
-            // 1 carrito ACTIVO por (StoreId + GuestId)
             b.HasIndex(x => new { x.StoreId, x.GuestId })
                 .IsUnique()
                 .HasFilter("[GuestId] IS NOT NULL AND [Status] = 0");
@@ -286,11 +284,9 @@ public sealed class OnlineShopDbContext
             b.Property(x => x.LineTotal).HasPrecision(18, 2);
 
             b.HasIndex(x => new { x.OrderId, x.ProductId, x.VariantId });
-
-            // Opcional: no FK para evitar cascadas/locks con catálogo.
-            // Si quieres FK, cámbialo a Restrict/NoAction.
         });
 
+        // ===== PaymentAttempt =====
         modelBuilder.Entity<PaymentAttempt>(b =>
         {
             b.ToTable("PaymentAttempts");
@@ -308,6 +304,21 @@ public sealed class OnlineShopDbContext
 
             b.HasIndex(x => x.ProviderPaymentId);
             b.HasIndex(x => x.ProviderSessionId);
+        });
+
+        // ===== ProcessedWebhookEvent =====
+        modelBuilder.Entity<ProcessedWebhookEvent>(b =>
+        {
+            b.ToTable("ProcessedWebhookEvents");
+            b.HasKey(x => x.Id);
+
+            b.Property(x => x.Provider).HasMaxLength(32).IsRequired();
+            b.Property(x => x.EventId).HasMaxLength(200).IsRequired();
+            b.Property(x => x.EventType).HasMaxLength(120).IsRequired();
+            b.Property(x => x.CreatedAt).IsRequired();
+
+            b.HasIndex(x => new { x.Provider, x.EventId }).IsUnique();
+            b.HasIndex(x => x.CreatedAt);
         });
     }
 }
