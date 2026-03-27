@@ -1,0 +1,129 @@
+using System.Net;
+using System.Text.Json;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc.RazorPages;
+
+namespace OnlineShop.Admin.Pages.Checkout;
+
+public class SuccessModel : PageModel
+{
+    private readonly IHttpClientFactory _httpClientFactory;
+    private readonly ILogger<SuccessModel> _logger;
+
+    public SuccessModel(IHttpClientFactory httpClientFactory, ILogger<SuccessModel> logger)
+    {
+        _httpClientFactory = httpClientFactory;
+        _logger = logger;
+    }
+
+    [BindProperty(SupportsGet = true)]
+    public Guid OrderId { get; set; }
+
+    public OrderSummaryDto? Order { get; private set; }
+    public string? ErrorMessage { get; private set; }
+
+    public async Task OnGetAsync(CancellationToken ct)
+    {
+        if (OrderId == Guid.Empty)
+        {
+            ErrorMessage = "Falta orderId.";
+            return;
+        }
+
+        if (!Request.Cookies.TryGetValue("os_guest_id", out var guestId) || string.IsNullOrWhiteSpace(guestId))
+        {
+            ErrorMessage = "No se encontró GuestId. Abre esta pantalla desde el mismo navegador donde hiciste el checkout.";
+            return;
+        }
+
+        try
+        {
+            var client = _httpClientFactory.CreateClient("OnlineShopApi");
+
+            using var req = new HttpRequestMessage(HttpMethod.Get, $"api/checkout/orders/{OrderId}/summary");
+            req.Headers.Add("X-Guest-Id", guestId);
+
+            using var res = await client.SendAsync(req, ct);
+
+            if (res.StatusCode == HttpStatusCode.NotFound)
+            {
+                ErrorMessage = "Orden no encontrada.";
+                return;
+            }
+
+            if (res.StatusCode == HttpStatusCode.BadRequest)
+            {
+                ErrorMessage = "Solicitud inválida para consultar la orden.";
+                return;
+            }
+
+            if (!res.IsSuccessStatusCode)
+            {
+                var body = await res.Content.ReadAsStringAsync(ct);
+                ErrorMessage = $"No se pudo cargar el resumen de la orden. HTTP {(int)res.StatusCode}. {body}";
+                return;
+            }
+
+            await using var stream = await res.Content.ReadAsStreamAsync(ct);
+
+            var dto = await JsonSerializer.DeserializeAsync<OrderSummaryDto>(
+                stream,
+                new JsonSerializerOptions
+                {
+                    PropertyNameCaseInsensitive = true
+                },
+                ct
+            );
+
+            if (dto is null)
+            {
+                ErrorMessage = "La respuesta del servidor llegó vacía.";
+                return;
+            }
+
+            Order = dto;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error cargando resumen de la orden {OrderId}", OrderId);
+            ErrorMessage = "Ocurrió un error al consultar la orden.";
+        }
+    }
+
+    public sealed record OrderSummaryItemDto(
+        Guid ProductId,
+        Guid? VariantId,
+        string ProductName,
+        string? VariantSku,
+        string? VariantSize,
+        string? VariantColor,
+        string? ImageUrl,
+        int Quantity,
+        decimal UnitPrice,
+        decimal LineTotal
+    );
+
+    public sealed record OrderSummaryDto(
+        Guid OrderId,
+        string Status,
+        string Currency,
+        decimal Subtotal,
+        decimal Shipping,
+        decimal Tax,
+        decimal Total,
+        string CustomerEmail,
+        string ShippingName,
+        string ShippingPhone,
+        string ShippingAddress1,
+        string? ShippingAddress2,
+        string ShippingCity,
+        string ShippingState,
+        string ShippingPostalCode,
+        string ShippingCountry,
+        string? Provider,
+        string? ProviderPaymentId,
+        DateTime? PaidAt,
+        DateTime CreatedAt,
+        IReadOnlyList<OrderSummaryItemDto> Items
+    );
+}

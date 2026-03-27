@@ -1,0 +1,44 @@
+﻿@page
+@model OnlineShop.Admin.Shared._LayoutModel
+@{
+}
+
+
+<script>
+    (function () {
+        const storageKey = "os_guest_id";
+        const cookieName = "os_guest_id";
+
+        function getCookie(name) {
+            const parts = document.cookie.split("; ").find(r => r.startsWith(name + "="));
+            return parts ? decodeURIComponent(parts.split("=")[1]) : null;
+        }
+
+        function setCookie(name, value) {
+            document.cookie = `${name}=${encodeURIComponent(value)}; path=/; max-age=31536000; samesite=lax`;
+        }
+
+        function getOrCreateGuestId() {
+            let guestId = localStorage.getItem(storageKey) || getCookie(cookieName);
+
+            if (!guestId && window.crypto && window.crypto.randomUUID) {
+                guestId = window.crypto.randomUUID();
+            }
+
+            if (!guestId) {
+                guestId = "guest-" + Math.random().toString(36).slice(2) + Date.now().toString(36);
+            }
+
+            localStorage.setItem(storageKey, guestId);
+            setCookie(cookieName, guestId);
+
+            return guestId;
+        }
+
+        window.onlineShopGuest = {
+            getOrCreateGuestId
+        };
+
+        getOrCreateGuestId();
+    })();
+</script>

@@ -1,0 +1,32 @@
+﻿@page
+@model OnlineShop.Admin.Pages.Checkout.CancelModel
+@{
+    ViewData["Title"] = "Pago cancelado";
+}
+
+<div class="container py-4">
+    <div class="card shadow-sm">
+        <div class="card-body">
+            <h1 class="h3 mb-3 text-warning">Pago cancelado</h1>
+
+            <p class="mb-2">
+                No se completó el pago.
+            </p>
+
+            @if (Model.OrderId.HasValue)
+            {
+                <p class="mb-2">
+                    <strong>Orden:</strong> @Model.OrderId
+                </p>
+            }
+
+            <p class="text-muted mb-0">
+                Esta pantalla es informativa. Si luego quieres, hacemos el flujo para reabrir el carrito cuando el usuario cancela Stripe.
+            </p>
+
+            <div class="mt-4">
+                <a class="btn btn-primary" href="/">Volver al inicio</a>
+            </div>
+        </div>
+    </div>
+</div>
