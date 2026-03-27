@@ -28,7 +28,6 @@ public sealed class CheckoutController : ControllerBase
         _stripe = stripe.Value;
         _tax = taxOptions.Value;
 
-        // Set global (si existe)
         if (!string.IsNullOrWhiteSpace(_stripe.SecretKey))
             StripeConfiguration.ApiKey = _stripe.SecretKey;
     }
@@ -47,7 +46,44 @@ public sealed class CheckoutController : ControllerBase
     public sealed record StartCheckoutRequest(
         string CustomerEmail,
         ShippingDto Shipping,
-        string PaymentMethod = "manual" // manual | stripe (por ahora)
+        string PaymentMethod = "manual" // manual | stripe
+    );
+
+    public sealed record OrderSummaryItemDto(
+        Guid ProductId,
+        Guid? VariantId,
+        string ProductName,
+        string? VariantSku,
+        string? VariantSize,
+        string? VariantColor,
+        string? ImageUrl,
+        int Quantity,
+        decimal UnitPrice,
+        decimal LineTotal
+    );
+
+    public sealed record OrderSummaryDto(
+        Guid OrderId,
+        string Status,
+        string Currency,
+        decimal Subtotal,
+        decimal Shipping,
+        decimal Tax,
+        decimal Total,
+        string CustomerEmail,
+        string ShippingName,
+        string ShippingPhone,
+        string ShippingAddress1,
+        string? ShippingAddress2,
+        string ShippingCity,
+        string ShippingState,
+        string ShippingPostalCode,
+        string ShippingCountry,
+        string? Provider,
+        string? ProviderPaymentId,
+        DateTime? PaidAt,
+        DateTime CreatedAt,
+        IReadOnlyList<OrderSummaryItemDto> Items
     );
 
     // POST /api/checkout/{storeSlug}/start
@@ -56,6 +92,19 @@ public sealed class CheckoutController : ControllerBase
     {
         if (string.IsNullOrWhiteSpace(req.CustomerEmail))
             return BadRequest(new { error = "CustomerEmail requerido." });
+
+        if (req.Shipping is null)
+            return BadRequest(new { error = "Shipping requerido." });
+
+        if (string.IsNullOrWhiteSpace(req.Shipping.Name) ||
+            string.IsNullOrWhiteSpace(req.Shipping.Phone) ||
+            string.IsNullOrWhiteSpace(req.Shipping.Address1) ||
+            string.IsNullOrWhiteSpace(req.Shipping.City) ||
+            string.IsNullOrWhiteSpace(req.Shipping.State) ||
+            string.IsNullOrWhiteSpace(req.Shipping.PostalCode))
+        {
+            return BadRequest(new { error = "Shipping incompleto." });
+        }
 
         var (userId, guestId) = ResolveActor();
         if (userId is null && guestId is null)
@@ -70,7 +119,6 @@ public sealed class CheckoutController : ControllerBase
         if (store is null)
             return NotFound(new { error = "Store no encontrada o no aprobada." });
 
-        // ===== Carrito ACTIVO (tracked) =====
         var cart = await _db.Carts
             .Include(c => c.Items)
             .Where(c => c.StoreId == store.Id && c.Status == CartStatus.Active)
@@ -79,7 +127,6 @@ public sealed class CheckoutController : ControllerBase
 
         if (cart is null)
         {
-            // Si existe uno CheckoutPending, dilo explícito (no “vacío”)
             var pending = await _db.Carts.AsNoTracking()
                 .Where(c => c.StoreId == store.Id && c.Status == CartStatus.CheckoutPending)
                 .Where(c => userId != null ? c.UserId == userId : c.GuestId == guestId)
@@ -96,12 +143,8 @@ public sealed class CheckoutController : ControllerBase
             return BadRequest(new { error = "Carrito vacío o no encontrado." });
 
         var now = DateTime.UtcNow;
-
-        // Currency (por ahora desde StripeOptions; sirve para manual también)
         var currency = string.IsNullOrWhiteSpace(_stripe.Currency) ? "MXN" : _stripe.Currency.Trim().ToUpperInvariant();
 
-        // ===== Totales (con TaxOptions) =====
-        // Congelamos lineTotals con redondeo consistente (2 decimales, AwayFromZero)
         var cartLines = cart.Items.Select(ci => new
         {
             ci,
@@ -109,14 +152,11 @@ public sealed class CheckoutController : ControllerBase
         }).ToList();
 
         var subtotal = Round2(cartLines.Sum(x => x.LineTotal));
-        var shipping = 0m; // MVP
+        var shipping = 0m;
         var taxRate = _tax.GetRate(currency);
         var tax = Round2(subtotal * taxRate);
-
-        // Total SIEMPRE = Subtotal + Shipping + Tax
         var total = Round2(subtotal + shipping + tax);
 
-        // ===== Crear Order en memoria (todavía NO guardamos) =====
         var order = new Order
         {
             Id = Guid.NewGuid(),
@@ -147,7 +187,6 @@ public sealed class CheckoutController : ControllerBase
             UpdatedAt = now
         };
 
-        // Items snapshot
         foreach (var x in cartLines)
         {
             var ci = x.ci;
@@ -174,7 +213,6 @@ public sealed class CheckoutController : ControllerBase
             });
         }
 
-        // ===== Elegir método de pago =====
         var method = (req.PaymentMethod ?? "manual").Trim().ToLowerInvariant();
 
         string provider;
@@ -188,7 +226,7 @@ public sealed class CheckoutController : ControllerBase
             provider = "manual";
             providerPaymentId = $"manual-{order.Id}";
             paymentUrl = null;
-            payStatus = PaymentStatus.Pending; // manual = “pendiente”
+            payStatus = PaymentStatus.Pending;
         }
         else if (method == "stripe")
         {
@@ -200,11 +238,8 @@ public sealed class CheckoutController : ControllerBase
             var successUrl = $"{_stripe.FrontendBaseUrl}/checkout/success?orderId={order.Id}";
             var cancelUrl = $"{_stripe.FrontendBaseUrl}/checkout/cancel?orderId={order.Id}";
 
-            // Stripe: asegurar que el cobro coincida con order.Total.
-            // Como Shipping y Tax no están modelados como “automatic tax” aquí, los metemos como line items extra si aplica.
             var lineItems = order.Items.Select(i =>
             {
-                // Stripe NO acepta description="" -> si no hay descripción, debe ser null/omitida
                 var desc = string.Join(" / ",
                     new[] { i.VariantSku, i.VariantSize, i.VariantColor }
                         .Where(x => !string.IsNullOrWhiteSpace(x)));
@@ -241,7 +276,6 @@ public sealed class CheckoutController : ControllerBase
                         ProductData = new SessionLineItemPriceDataProductDataOptions
                         {
                             Name = "Envío"
-                            // Description omitida
                         }
                     }
                 });
@@ -259,7 +293,6 @@ public sealed class CheckoutController : ControllerBase
                         ProductData = new SessionLineItemPriceDataProductDataOptions
                         {
                             Name = "IVA"
-                            // Description omitida
                         }
                     }
                 });
@@ -295,7 +328,6 @@ public sealed class CheckoutController : ControllerBase
             return BadRequest(new { error = "paymentMethod inválido. Usa: manual | stripe" });
         }
 
-        // ===== PaymentAttempt =====
         order.Provider = provider;
         order.ProviderSessionId = providerSessionId;
         order.ProviderPaymentId = providerPaymentId;
@@ -315,7 +347,6 @@ public sealed class CheckoutController : ControllerBase
             UpdatedAt = now
         });
 
-        // Congelar carrito
         cart.Status = CartStatus.CheckoutPending;
         cart.UpdatedAt = now;
 
@@ -343,6 +374,96 @@ public sealed class CheckoutController : ControllerBase
         });
     }
 
+    // GET /api/checkout/orders/{orderId}/summary
+    [HttpGet("orders/{orderId:guid}/summary")]
+    public async Task<IActionResult> GetOrderSummary([FromRoute] Guid orderId, CancellationToken ct)
+    {
+        var (userId, guestId) = ResolveActor();
+        if (userId is null && guestId is null)
+            return BadRequest(new { error = "Falta X-Guest-Id (o autenticar usuario)." });
+
+        var orderQuery = _db.Orders
+            .AsNoTracking()
+            .Where(o => o.Id == orderId);
+
+        orderQuery = userId is not null
+            ? orderQuery.Where(o => o.UserId == userId)
+            : orderQuery.Where(o => o.GuestId == guestId);
+
+        var order = await orderQuery
+            .Select(o => new
+            {
+                o.Id,
+                o.Status,
+                o.Currency,
+                o.Subtotal,
+                o.Shipping,
+                o.Tax,
+                o.Total,
+                o.CustomerEmail,
+                o.ShippingName,
+                o.ShippingPhone,
+                o.ShippingAddress1,
+                o.ShippingAddress2,
+                o.ShippingCity,
+                o.ShippingState,
+                o.ShippingPostalCode,
+                o.ShippingCountry,
+                o.Provider,
+                o.ProviderPaymentId,
+                o.PaidAt,
+                o.CreatedAt
+            })
+            .SingleOrDefaultAsync(ct);
+
+        if (order is null)
+            return NotFound(new { error = "Orden no encontrada." });
+
+        var items = await _db.OrderItems
+            .AsNoTracking()
+            .Where(i => i.OrderId == orderId)
+            .OrderBy(i => i.CreatedAt)
+            .Select(i => new OrderSummaryItemDto(
+                i.ProductId,
+                i.VariantId,
+                i.ProductName,
+                i.VariantSku,
+                i.VariantSize,
+                i.VariantColor,
+                i.ImageUrl,
+                i.Quantity,
+                i.UnitPrice,
+                i.LineTotal
+            ))
+            .ToListAsync(ct);
+
+        var dto = new OrderSummaryDto(
+            order.Id,
+            order.Status.ToString(),
+            order.Currency,
+            order.Subtotal,
+            order.Shipping,
+            order.Tax,
+            order.Total,
+            order.CustomerEmail,
+            order.ShippingName,
+            order.ShippingPhone,
+            order.ShippingAddress1,
+            order.ShippingAddress2,
+            order.ShippingCity,
+            order.ShippingState,
+            order.ShippingPostalCode,
+            order.ShippingCountry,
+            order.Provider,
+            order.ProviderPaymentId,
+            order.PaidAt,
+            order.CreatedAt,
+            items
+        );
+
+        return Ok(dto);
+    }
+
     private (string? userId, string? guestId) ResolveActor()
     {
         var userId = User?.Identity?.IsAuthenticated == true
@@ -353,7 +474,8 @@ public sealed class CheckoutController : ControllerBase
         if (Request.Headers.TryGetValue("X-Guest-Id", out var values))
         {
             var v = values.FirstOrDefault();
-            if (!string.IsNullOrWhiteSpace(v)) guestId = v.Trim();
+            if (!string.IsNullOrWhiteSpace(v))
+                guestId = v.Trim();
         }
 
         return (userId, guestId);
