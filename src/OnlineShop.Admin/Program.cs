@@ -4,27 +4,35 @@ using OnlineShop.Admin.Data;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Add services to the container.
+// Blazor Server + Razor Pages
 builder.Services.AddRazorPages();
 builder.Services.AddServerSideBlazor();
 builder.Services.AddSingleton<WeatherForecastService>();
 
+// HttpClient hacia OnlineShop.Api
+builder.Services.AddHttpClient("OnlineShopApi", client =>
+{
+    var baseUrl = builder.Configuration["OnlineShopFrontend:ApiBaseUrl"]
+                  ?? throw new InvalidOperationException("Falta OnlineShopFrontend:ApiBaseUrl");
+
+    client.BaseAddress = new Uri(baseUrl);
+    client.Timeout = TimeSpan.FromSeconds(20);
+});
+
 var app = builder.Build();
 
-// Configure the HTTP request pipeline.
 if (!app.Environment.IsDevelopment())
 {
     app.UseExceptionHandler("/Error");
-    // The default HSTS value is 30 days. You may want to change this for production scenarios, see https://aka.ms/aspnetcore-hsts.
     app.UseHsts();
 }
 
 app.UseHttpsRedirection();
-
 app.UseStaticFiles();
-
 app.UseRouting();
 
+// Importante: mapear Razor Pages antes del fallback de Blazor
+app.MapRazorPages();
 app.MapBlazorHub();
 app.MapFallbackToPage("/_Host");
 
